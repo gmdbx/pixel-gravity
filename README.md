@@ -1,4 +1,4 @@
-# Pixel Gravity 0.1.1
+# Pixel Gravity 0.1.2
 
 Прототип эффекта Gravitation для штатного Pixel Launcher
 (`com.google.android.apps.nexuslauncher`) на Pixel 6. Целевая сборка Android —

@@ -7,6 +7,7 @@ import android.graphics.ColorFilter;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.graphics.RenderNode;
 import android.graphics.drawable.Drawable;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -198,6 +199,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         scene.setBounds(0, 0, root.getWidth(), root.getHeight());
         root.getOverlay().add(scene);
         active = true;
+        Log.i(Entry.TAG, "Gravity started with " + scene.bodies.size() + " icons");
         choreographer.postFrameCallback(this);
     }
 
@@ -216,9 +218,11 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             float centerX = xy[0] - rootPosition[0] + width / 2f;
             float centerY = xy[1] - rootPosition[1] + height / 2f;
             if (!arena.contains((int) centerX, (int) centerY)) return;
-            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            view.draw(new Canvas(bitmap));
-            scene.bodies.add(new Body(view, bitmap, centerX, centerY, density));
+            try {
+                scene.bodies.add(new Body(view, root.isHardwareAccelerated(), centerX, centerY, density));
+            } catch (RuntimeException failure) {
+                Log.w(Entry.TAG, "Could not capture launcher icon", failure);
+            }
         } else if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
             for (int index = 0; index < group.getChildCount(); index++) {
@@ -318,8 +322,16 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
         @Override public void draw(Canvas canvas) {
             for (Body body : bodies) {
-                canvas.drawBitmap(body.bitmap, body.x - body.bitmap.getWidth() / 2f,
-                        body.y - body.bitmap.getHeight() / 2f, paint);
+                float left = body.x - body.width / 2f;
+                float top = body.y - body.height / 2f;
+                if (body.renderNode == null) {
+                    canvas.drawBitmap(body.bitmap, left, top, paint);
+                } else if (canvas.isHardwareAccelerated()) {
+                    int save = canvas.save();
+                    canvas.translate(left, top);
+                    canvas.drawRenderNode(body.renderNode);
+                    canvas.restoreToCount(save);
+                }
             }
         }
         @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
@@ -330,23 +342,42 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private static final class Body {
         final View view;
         final Bitmap bitmap;
+        final RenderNode renderNode;
+        final int width, height;
         final float alpha, homeX, homeY, radius;
         float x, y, vx, vy;
 
-        Body(View view, Bitmap bitmap, float centerX, float centerY, float density) {
+        Body(View view, boolean hardwareAccelerated, float centerX, float centerY, float density) {
             this.view = view;
-            this.bitmap = bitmap;
+            width = view.getWidth();
+            height = view.getHeight();
+            if (hardwareAccelerated) {
+                // Themed Pixel Launcher icons may contain hardware-backed bitmaps.
+                bitmap = null;
+                renderNode = new RenderNode("PixelGravityIcon");
+                renderNode.setPosition(0, 0, width, height);
+                Canvas recording = renderNode.beginRecording();
+                try {
+                    view.draw(recording);
+                } finally {
+                    renderNode.endRecording();
+                }
+            } else {
+                renderNode = null;
+                bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                view.draw(new Canvas(bitmap));
+            }
             alpha = view.getAlpha();
             homeX = x = centerX;
             homeY = y = centerY;
-            radius = Math.min(27 * density, Math.min(bitmap.getWidth(), bitmap.getHeight()) / 2f);
+            radius = Math.min(27 * density, Math.min(width, height) / 2f);
             vx = (float) (Math.random() - 0.5) * 260 * density;
             vy = (float) (Math.random() - 0.5) * 260 * density;
         }
 
         void constrain(Rect bounds) {
-            float halfWidth = Math.min(bitmap.getWidth() / 2f, bounds.width() / 2f);
-            float halfHeight = Math.min(bitmap.getHeight() / 2f, bounds.height() / 2f);
+            float halfWidth = Math.min(width / 2f, bounds.width() / 2f);
+            float halfHeight = Math.min(height / 2f, bounds.height() / 2f);
             float minX = bounds.left + halfWidth, maxX = bounds.right - halfWidth;
             float minY = bounds.top + halfHeight, maxY = bounds.bottom - halfHeight;
             if (x < minX) { x = minX; vx = Math.abs(vx) * 0.65f; }
