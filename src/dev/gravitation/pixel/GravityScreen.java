@@ -97,7 +97,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private boolean resumedAfterLaunch;
     private ViewTreeObserver launchReturnObserver;
     private ViewTreeObserver workspaceObserver;
-    private final IdentityHashMap<Object, float[]> launchPositions = new IdentityHashMap<>();
+    private final ArrayList<Body> parkedBodies = new ArrayList<>();
+    private View parkedPage;
+    private int parkedPageBodyCount;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable finishLaunchGrace = new Runnable() {
         @Override public void run() {
@@ -143,6 +145,12 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 @Override public boolean onPreDraw() {
                     try {
                         syncWorkspacePage();
+                        if (active && launchSource == null) {
+                            hideOriginals(scene.bodies);
+                            for (PageLayer layer : scene.pageLayers.values()) {
+                                hideOriginals(layer.bodies);
+                            }
+                        }
                     } catch (RuntimeException failure) {
                         reset();
                         Log.w(Entry.TAG, "Could not follow launcher page change", failure);
@@ -232,14 +240,15 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
         pagingTouch = false;
         pageSwitchDeadline = 0;
-        for (Body body : scene.bodies) {
-            launchPositions.put(body.key, new float[]{body.x, body.y, body.vx, body.vy});
-        }
+        parkedPage = scenePage;
+        parkedPageBodyCount = scene.pageLayers.isEmpty() ? pageBodyCount : 0;
+        parkedBodies.clear();
+        parkedBodies.addAll(scene.bodies);
         removeScene();
     }
 
     void prepareLaunchReturn() {
-        if (launchPositions.isEmpty()) return;
+        if (parkedBodies.isEmpty()) return;
         if (launchReturnObserver == null || !launchReturnObserver.isAlive()) {
             launchReturnObserver = root.getViewTreeObserver();
             launchReturnObserver.addOnPreDrawListener(launchReturnListener);
@@ -259,7 +268,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         try {
             begin();
             if (!active) return;
-            launchPositions.clear();
+            clearParkedBodies();
             stopWatchingLaunchReturn();
             if (!launchPaused) startReturnGrace();
             Log.i(Entry.TAG, "Rebuilt gravity before drawing the home screen");
@@ -270,7 +279,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     boolean resumeAfterLaunch() {
-        if (!launchPaused || (!active && launchPositions.isEmpty())) return false;
+        if (!launchPaused || (!active && parkedBodies.isEmpty())) return false;
         launchPaused = false;
         restoreLaunchSource();
         initialized = false;
@@ -421,9 +430,13 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         scenePage = visiblePage();
         sceneScrollX = workspace != null ? workspace.getScrollX() : 0;
         collect(scenePage != null ? scenePage : workspace, rootPosition, scene.bodies, true);
+        if (scenePage == parkedPage) {
+            mergeParkedBodies(0, parkedPageBodyCount, 0);
+        }
         pageBodyCount = scene.bodies.size();
         collect(hotseat, rootPosition, scene.bodies, true);
         if (root instanceof ViewGroup) collectSearchOutsideWorkspace((ViewGroup) root, rootPosition);
+        mergeParkedBodies(parkedPageBodyCount, parkedBodies.size(), pageBodyCount);
         IdentityHashMap<Object, float[]> savedPage = pagePositions.get(scenePage);
         if (scene.bodies.isEmpty()) {
             Log.w(Entry.TAG, "No visible BubbleTextView icons");
@@ -432,14 +445,51 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         scene.setBounds(0, 0, root.getWidth(), root.getHeight());
         root.getOverlay().add(scene);
         for (Body body : scene.bodies) {
-            float[] position = launchPositions.get(body.key);
-            if (position == null && savedPage != null) position = savedPage.get(body.key);
-            restorePosition(body, position);
-            body.view.setTransitionAlpha(0f);
+            if (parkedBodies.contains(body)) body.constrain(arena);
+            else if (savedPage != null) restorePosition(body, savedPage.get(body.key));
         }
+        hideOriginals(scene.bodies);
         active = true;
-        Log.i(Entry.TAG, "Gravity started with " + scene.bodies.size() + " items");
+        Log.i(Entry.TAG, "Gravity started with " + pageBodyCount + " page items and "
+                + (scene.bodies.size() - pageBodyCount) + " shared items");
         choreographer.postFrameCallback(this);
+    }
+
+    private void mergeParkedBodies(int from, int to, int firstSceneIndex) {
+        for (int index = from; index < to; index++) {
+            Body parked = parkedBodies.get(index);
+            View view = parked.view;
+            // Quickstep may temporarily hide the hotseat or move it outside the window.
+            if (view.getRootView() != root || !view.isAttachedToWindow()
+                    || view.getVisibility() == View.GONE || view.getWidth() != parked.width
+                    || view.getHeight() != parked.height || itemKey(view) != parked.key) continue;
+            int existing = firstSceneIndex;
+            while (existing < scene.bodies.size() && scene.bodies.get(existing).view != view) {
+                existing++;
+            }
+            if (existing < scene.bodies.size()) {
+                scene.bodies.set(existing, parked);
+            } else {
+                scene.bodies.add(parked);
+            }
+        }
+    }
+
+    private void clearParkedBodies() {
+        parkedBodies.clear();
+        parkedPage = null;
+        parkedPageBodyCount = 0;
+    }
+
+    private static Object itemKey(View view) {
+        Object tag = view.getTag();
+        return tag != null ? tag : view;
+    }
+
+    private static void hideOriginals(List<Body> bodies) {
+        for (Body body : bodies) {
+            if (body.view.getTransitionAlpha() != 0f) body.view.setTransitionAlpha(0f);
+        }
     }
 
     private View visiblePage() {
@@ -926,7 +976,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         pageSwitchDeadline = 0;
         recycleSwipeStart();
         pagePositions.clear();
-        launchPositions.clear();
+        clearParkedBodies();
         removeScene();
     }
 
@@ -1038,8 +1088,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                 view.draw(new Canvas(bitmap));
             }
-            Object tag = view.getTag();
-            key = tag != null ? tag : view;
+            key = itemKey(view);
             transitionAlpha = view.getTransitionAlpha();
             homeX = x = centerX;
             homeY = y = centerY;
