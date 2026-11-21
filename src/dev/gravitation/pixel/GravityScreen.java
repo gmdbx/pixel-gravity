@@ -20,14 +20,18 @@ import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewConfiguration;
+import android.view.Window;
 import android.view.WindowInsets;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 
 final class GravityScreen implements SensorEventListener, Choreographer.FrameCallback {
-    private static final float GRAVITY_SCALE = 245f;
+    private static final float GRAVITY_SCALE = 330f;
 
     final Activity activity;
     private final View root;
@@ -56,6 +60,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private boolean tap;
     private float downX, downY;
     private Body pressedBody;
+    private Window.Callback originalCallback;
+    private Window.Callback touchCallback;
 
     GravityScreen(Activity activity) throws ReflectiveOperationException {
         this.activity = activity;
@@ -78,6 +84,27 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     void startListening() {
+        Window window = activity.getWindow();
+        originalCallback = window.getCallback();
+        if (originalCallback == null) return;
+        touchCallback = (Window.Callback) Proxy.newProxyInstance(
+                GravityScreen.class.getClassLoader(), new Class<?>[]{Window.Callback.class},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                        if (method.getName().equals("dispatchTouchEvent")
+                                && handleTouch((MotionEvent) args[0])) {
+                            return true;
+                        }
+                        try {
+                            return method.invoke(originalCallback, args);
+                        } catch (InvocationTargetException failure) {
+                            throw failure.getCause();
+                        }
+                    }
+                });
+        window.setCallback(touchCallback);
+        Log.i(Entry.TAG, "Launcher window touch callback installed");
         Sensor accelerometer = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         if (accelerometer == null || !sensors.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME)) {
             Log.w(Entry.TAG, "Accelerometer unavailable");
@@ -85,6 +112,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     void close() {
+        Window window = activity.getWindow();
+        if (touchCallback != null && window.getCallback() == touchCallback) {
+            window.setCallback(originalCallback);
+        }
         sensors.unregisterListener(this);
         reset();
     }
@@ -334,10 +365,12 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                     ? pressedBody : null;
             trackingTouch = false;
             pressedBody = null;
-            if (active && action == MotionEvent.ACTION_UP) reset();
             if (selected != null && selected.view.isAttachedToWindow()
-                    && selected.view.isClickable() && selected.view.isEnabled()) {
-                selected.view.performClick();
+                    && selected.view.isClickable() && selected.view.isEnabled()
+                    && event.getEventTime() - event.getDownTime() < ViewConfiguration.getLongPressTimeout()) {
+                reset();
+                boolean handled = selected.view.performClick();
+                Log.i(Entry.TAG, "Animated icon tap handled: " + handled);
             }
         }
         return true;

@@ -5,7 +5,6 @@ import android.app.Application;
 import android.content.Context;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.MotionEvent;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
@@ -26,18 +25,6 @@ public final class Entry implements IXposedHookLoadPackage {
                     if (TARGET.equals(app.getPackageName())) {
                         Lifecycle lifecycle = new Lifecycle();
                         app.registerActivityLifecycleCallbacks(lifecycle);
-                        XposedHelpers.findAndHookMethod(Activity.class, "dispatchTouchEvent",
-                            MotionEvent.class, new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam touch) {
-                                    GravityScreen screen = lifecycle.screen;
-                                    MotionEvent event = (MotionEvent) touch.args[0];
-                                    if (screen != null && screen.activity == touch.thisObject
-                                            && screen.handleTouch(event)) {
-                                        touch.setResult(true);
-                                    }
-                                }
-                            });
                         Log.i(TAG, "Loaded in Pixel Launcher");
                     }
                 }
