@@ -15,6 +15,7 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Choreographer;
 import android.view.MotionEvent;
@@ -31,6 +32,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 
 final class GravityScreen implements SensorEventListener, Choreographer.FrameCallback {
     private static final float GRAVITY_SCALE = 330f;
@@ -70,11 +72,13 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private boolean launchingApp;
     private boolean launchPaused;
     private boolean resumedAfterLaunch;
+    private long restoreDeadline;
+    private final IdentityHashMap<Object, float[]> launchPositions = new IdentityHashMap<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable finishLaunchGrace = new Runnable() {
         @Override public void run() {
             if (launchPaused) {
-                choreographer.removeFrameCallback(GravityScreen.this);
+                parkLaunchScene();
                 return;
             }
             launchingApp = false;
@@ -143,19 +147,25 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         return true;
     }
 
+    void parkLaunchScene() {
+        if (!launchPaused || !active) return;
+        for (Body body : scene.bodies) {
+            launchPositions.put(body.key, new float[]{body.x, body.y, body.vx, body.vy});
+        }
+        removeScene();
+    }
+
     boolean resumeAfterLaunch() {
-        if (!launchPaused || !active) return false;
+        if (!launchPaused) return false;
+        parkLaunchScene();
+        if (launchPositions.isEmpty()) return false;
         launchPaused = false;
-        resumedAfterLaunch = true;
         initialized = false;
         previousHit = 0;
-        lastFrame = 0;
         registerAccelerometer();
         mainHandler.removeCallbacks(finishLaunchGrace);
-        mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
-        choreographer.removeFrameCallback(this);
+        restoreDeadline = SystemClock.uptimeMillis() + 1000;
         choreographer.postFrameCallback(this);
-        Log.i(Entry.TAG, "Resumed gravity after app launch");
         return true;
     }
 
@@ -284,9 +294,19 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             Log.w(Entry.TAG, "No visible BubbleTextView icons");
             return;
         }
-        for (Body body : scene.bodies) body.view.setAlpha(0f);
         scene.setBounds(0, 0, root.getWidth(), root.getHeight());
         root.getOverlay().add(scene);
+        for (Body body : scene.bodies) {
+            float[] position = launchPositions.get(body.key);
+            if (position != null) {
+                body.x = position[0];
+                body.y = position[1];
+                body.vx = position[2];
+                body.vy = position[3];
+                body.constrain(arena);
+            }
+            body.view.setTransitionAlpha(0f);
+        }
         active = true;
         Log.i(Entry.TAG, "Gravity started with " + scene.bodies.size() + " icons");
         choreographer.postFrameCallback(this);
@@ -294,6 +314,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     private void collect(View view, int[] rootPosition) {
         if (view == null || view.getVisibility() != View.VISIBLE || view.getAlpha() <= 0
+                || view.getTransitionAlpha() <= 0
                 || scene.bodies.size() >= 48) return;
         if (iconType.isInstance(view)) {
             int width = view.getWidth();
@@ -322,8 +343,31 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     @Override
     public void doFrame(long time) {
-        if (!active || (launchPaused && root.getWindowVisibility() != View.VISIBLE)) return;
         try {
+            if (restoreDeadline != 0) {
+                if (SystemClock.uptimeMillis() >= restoreDeadline) {
+                    reset();
+                } else if (onHome()) {
+                    restoreDeadline = 0;
+                    begin();
+                    launchPositions.clear();
+                    if (active) {
+                        resumedAfterLaunch = true;
+                        mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
+                        Log.i(Entry.TAG, "Rebuilt gravity scene after app launch");
+                    } else {
+                        reset();
+                    }
+                } else {
+                    choreographer.postFrameCallback(this);
+                }
+                return;
+            }
+            if (!active) return;
+            if (launchPaused && root.getWindowVisibility() != View.VISIBLE) {
+                parkLaunchScene();
+                return;
+            }
             if ((!launchingApp && !onHome()) || !root.isAttachedToWindow()
                     || scene.getBounds().width() != root.getWidth()
                     || scene.getBounds().height() != root.getHeight()) {
@@ -452,10 +496,18 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         launchPaused = false;
         resumedAfterLaunch = false;
         pressedBody = null;
+        restoreDeadline = 0;
+        launchPositions.clear();
+        removeScene();
+    }
+
+    private void removeScene() {
         choreographer.removeFrameCallback(this);
         root.getOverlay().remove(scene);
         for (Body body : scene.bodies) {
-            if (body.view.getAlpha() == 0f) body.view.setAlpha(body.alpha);
+            if (body.view.getTransitionAlpha() == 0f) {
+                body.view.setTransitionAlpha(body.transitionAlpha);
+            }
         }
         scene.bodies.clear();
         active = false;
@@ -492,7 +544,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final Bitmap bitmap;
         final RenderNode renderNode;
         final int width, height;
-        final float alpha, homeX, homeY, radius;
+        final Object key;
+        final float transitionAlpha, homeX, homeY, radius;
         float x, y, vx, vy;
 
         Body(View view, boolean hardwareAccelerated, float centerX, float centerY, float density) {
@@ -515,7 +568,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                 view.draw(new Canvas(bitmap));
             }
-            alpha = view.getAlpha();
+            Object tag = view.getTag();
+            key = tag != null ? tag : view;
+            transitionAlpha = view.getTransitionAlpha();
             homeX = x = centerX;
             homeY = y = centerY;
             radius = Math.min(27 * density, Math.min(width, height) / 2f);
