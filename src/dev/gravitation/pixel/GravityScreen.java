@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
@@ -36,6 +37,7 @@ import java.util.IdentityHashMap;
 
 final class GravityScreen implements SensorEventListener, Choreographer.FrameCallback {
     private static final float GRAVITY_SCALE = 330f;
+    private static final float MAX_SPEED_DP_PER_SECOND = 950f;
     private static final float SHAKE_ACCELERATION_THRESHOLD = 13.5f; // m/s²
 
     private static final long APP_LAUNCH_GRACE_MS = 2000;
@@ -86,6 +88,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private Window.Callback originalCallback;
     private Window.Callback touchCallback;
     private boolean launchingApp;
+    private LaunchSource launchSource;
     private boolean launchPaused;
     private boolean resumedAfterLaunch;
     private long restoreDeadline;
@@ -97,6 +100,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 parkLaunchScene();
                 return;
             }
+            restoreLaunchSource();
             launchingApp = false;
             resumedAfterLaunch = false;
             if (onHome()) returning = true;
@@ -524,17 +528,33 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 break;
         }
         float step = dt / 3;
+        float damping = (float) Math.pow(0.987f, step * 180);
+        float maxSpeed = MAX_SPEED_DP_PER_SECOND * density;
+        Body opening = launchSource != null ? launchSource.body : null;
         for (int part = 0; part < 3; part++) {
             for (Body body : scene.bodies) {
-                body.vx = (body.vx + gx * GRAVITY_SCALE * density * step) * 0.987f;
-                body.vy = (body.vy + gy * GRAVITY_SCALE * density * step) * 0.987f;
+                if (body == opening) continue;
+                body.vx = (body.vx + gx * GRAVITY_SCALE * density * step) * damping;
+                body.vy = (body.vy + gy * GRAVITY_SCALE * density * step) * damping;
+                float speedSquared = body.vx * body.vx + body.vy * body.vy;
+                if (speedSquared > maxSpeed * maxSpeed) {
+                    float scale = maxSpeed / (float) Math.sqrt(speedSquared);
+                    body.vx *= scale;
+                    body.vy *= scale;
+                }
                 body.x += body.vx * step;
                 body.y += body.vy * step;
             }
             for (int i = 0; i < scene.bodies.size(); i++) {
                 Body body = scene.bodies.get(i);
-                for (int j = 0; j < i; j++) body.collide(scene.bodies.get(j));
-                body.constrain(arena);
+                if (body == opening) continue;
+                for (int j = 0; j < i; j++) {
+                    Body other = scene.bodies.get(j);
+                    if (other != opening) body.collide(other);
+                }
+            }
+            for (Body body : scene.bodies) {
+                if (body != opening) body.constrain(arena);
             }
         }
     }
@@ -603,6 +623,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
                 boolean handled = false;
                 try {
+                    moveLaunchSource(selected);
                     handled = selected.view.performClick();
                 } finally {
                     if (!handled) reset();
@@ -611,6 +632,39 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             }
         }
         return true;
+    }
+
+    private void moveLaunchSource(Body body) {
+        restoreLaunchSource();
+        View view = body.view;
+        int[] rootPosition = new int[2];
+        int[] viewPosition = new int[2];
+        root.getLocationOnScreen(rootPosition);
+        view.getLocationOnScreen(viewPosition);
+        float[] offset = {
+                rootPosition[0] + body.x - body.width / 2f - viewPosition[0],
+                rootPosition[1] + body.y - body.height / 2f - viewPosition[1]
+        };
+        if (view.getParent() instanceof View) {
+            Matrix parentToScreen = new Matrix();
+            ((View) view.getParent()).transformMatrixToGlobal(parentToScreen);
+            Matrix screenToParent = new Matrix();
+            if (!parentToScreen.invert(screenToParent)) return;
+            screenToParent.mapVectors(offset);
+        }
+        launchSource = new LaunchSource(body, offset[0], offset[1]);
+        // Quickstep reads the source bounds asynchronously after performClick().
+        view.setTranslationX(launchSource.targetX);
+        view.setTranslationY(launchSource.targetY);
+    }
+
+    private void restoreLaunchSource() {
+        if (launchSource == null) return;
+        LaunchSource source = launchSource;
+        launchSource = null;
+        View view = source.body.view;
+        if (view.getTranslationX() == source.targetX) view.setTranslationX(source.originalX);
+        if (view.getTranslationY() == source.targetY) view.setTranslationY(source.originalY);
     }
 
     private void passPageSwipe() {
@@ -743,6 +797,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     private void removeScene() {
+        restoreLaunchSource();
         choreographer.removeFrameCallback(this);
         root.getOverlay().remove(scene);
         for (Body body : scene.bodies) restoreVisibility(body);
@@ -761,6 +816,19 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private void restoreVisibility(Body body) {
         if (body.view.getTransitionAlpha() == 0f) {
             body.view.setTransitionAlpha(body.transitionAlpha);
+        }
+    }
+
+    private static final class LaunchSource {
+        final Body body;
+        final float originalX, originalY, targetX, targetY;
+
+        LaunchSource(Body body, float offsetX, float offsetY) {
+            this.body = body;
+            originalX = body.view.getTranslationX();
+            originalY = body.view.getTranslationY();
+            targetX = originalX + offsetX;
+            targetY = originalY + offsetY;
         }
     }
 
@@ -787,6 +855,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
 
         private void drawBody(Canvas canvas, Body body, int offset) {
+            if (launchSource != null && body == launchSource.body && !root.hasWindowFocus()) return;
             float left = body.x - body.width / 2f + offset;
             float top = body.y - body.height / 2f;
             if (body.renderNode == null) {
@@ -810,7 +879,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final int width, height;
         final boolean launcherBar;
         final Object key;
-        final float transitionAlpha, homeY, radius;
+        final float transitionAlpha, homeY, radius, bounceThreshold, contactSlop;
         float homeX, x, y, vx, vy;
 
         Body(View view, boolean hardwareAccelerated, float centerX, float centerY, float density,
@@ -841,8 +910,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             homeX = x = centerX;
             homeY = y = centerY;
             radius = Math.min(27 * density, Math.min(width, height) / 2f);
-            vx = (float) (Math.random() - 0.5) * 260 * density;
-            vy = (float) (Math.random() - 0.5) * 260 * density;
+            bounceThreshold = 80 * density;
+            contactSlop = 0.5f * density;
+            vx = (float) (Math.random() - 0.5) * 130 * density;
+            vy = (float) (Math.random() - 0.5) * 130 * density;
         }
 
         void constrain(Rect bounds) {
@@ -850,10 +921,14 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             float halfHeight = Math.min(height / 2f, bounds.height() / 2f);
             float minX = bounds.left + halfWidth, maxX = bounds.right - halfWidth;
             float minY = bounds.top + halfHeight, maxY = bounds.bottom - halfHeight;
-            if (x < minX) { x = minX; vx = Math.abs(vx) * 0.65f; }
-            if (x > maxX) { x = maxX; vx = -Math.abs(vx) * 0.65f; }
-            if (y < minY) { y = minY; vy = Math.abs(vy) * 0.65f; }
-            if (y > maxY) { y = maxY; vy = -Math.abs(vy) * 0.65f; }
+            if (x < minX) { x = minX; vx = rebound(-vx); }
+            if (x > maxX) { x = maxX; vx = -rebound(vx); }
+            if (y < minY) { y = minY; vy = rebound(-vy); }
+            if (y > maxY) { y = maxY; vy = -rebound(vy); }
+        }
+
+        private float rebound(float impactSpeed) {
+            return impactSpeed > bounceThreshold ? impactSpeed * 0.48f : 0;
         }
 
         void collide(Body other) {
@@ -881,13 +956,15 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
 
         private void separate(Body other, float nx, float ny, float separation) {
-            x += nx * separation;
-            y += ny * separation;
-            other.x -= nx * separation;
-            other.y -= ny * separation;
+            float correction = Math.max(0, separation - contactSlop) * 0.8f;
+            x += nx * correction;
+            y += ny * correction;
+            other.x -= nx * correction;
+            other.y -= ny * correction;
             float relativeSpeed = (vx - other.vx) * nx + (vy - other.vy) * ny;
             if (relativeSpeed >= 0) return;
-            float impulse = -relativeSpeed * 0.8f;
+            float restitution = -relativeSpeed > bounceThreshold ? 0.40f : 0f;
+            float impulse = -relativeSpeed * (1 + restitution) / 2f;
             vx += impulse * nx;
             vy += impulse * ny;
             other.vx -= impulse * nx;
