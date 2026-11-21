@@ -19,6 +19,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 
@@ -28,9 +29,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private final View workspace;
     private final View hotseat;
     private final Class<?> iconType;
-    private final Method getState;
-    private final Object stateManager;
-    private final Object normalState;
+    private final View appDrawer;
+    private final View overview;
+    private final HomeState homeState;
     private final SensorManager sensors;
     private final Choreographer choreographer = Choreographer.getInstance();
     private final Scene scene = new Scene();
@@ -54,10 +55,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         hotseat = findView("hotseat");
         ClassLoader loader = activity.getClassLoader();
         iconType = loader.loadClass("com.android.launcher3.BubbleTextView");
-        Class<?> launcherState = loader.loadClass("com.android.launcher3.LauncherState");
-        normalState = launcherState.getField("NORMAL").get(null);
-        stateManager = activity.getClass().getMethod("getStateManager").invoke(activity);
-        getState = stateManager.getClass().getMethod("getState");
+        appDrawer = findView("apps_view");
+        overview = findView("overview_panel");
+        homeState = resolveHomeState(loader);
         sensors = activity.getSystemService(SensorManager.class);
     }
 
@@ -78,12 +78,67 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         reset();
     }
 
-    private boolean onHome() {
+    private interface HomeState {
+        boolean isNormal() throws ReflectiveOperationException;
+    }
+
+    private HomeState resolveHomeState(ClassLoader loader) {
         try {
-            return workspace != null && workspace.isShown() && root.hasWindowFocus()
-                    && getState.invoke(stateManager) == normalState;
-        } catch (ReflectiveOperationException failure) {
-            return false;
+            Class<?> launcherState = loader.loadClass("com.android.launcher3.LauncherState");
+            Object normal = launcherState.getField("NORMAL").get(null);
+            for (Method method : activity.getClass().getMethods()) {
+                if (method.getName().equals("isInState") && method.getReturnType() == boolean.class
+                        && method.getParameterCount() == 1
+                        && method.getParameterTypes()[0].isInstance(normal)) {
+                    Log.i(Entry.TAG, "Home state via Launcher.isInState");
+                    return new HomeState() {
+                        @Override public boolean isNormal() throws ReflectiveOperationException {
+                            return (boolean) method.invoke(activity, normal);
+                        }
+                    };
+                }
+            }
+            Object manager = activity.getClass().getMethod("getStateManager").invoke(activity);
+            try {
+                Method getter = manager.getClass().getMethod("getState");
+                Log.i(Entry.TAG, "Home state via StateManager.getState");
+                return new HomeState() {
+                    @Override public boolean isNormal() throws ReflectiveOperationException {
+                        return getter.invoke(manager) == normal;
+                    }
+                };
+            } catch (NoSuchMethodException missingGetter) {
+                Field state = manager.getClass().getDeclaredField("mState");
+                state.setAccessible(true);
+                Log.i(Entry.TAG, "Home state via StateManager.mState");
+                return new HomeState() {
+                    @Override public boolean isNormal() throws ReflectiveOperationException {
+                        return state.get(manager) == normal;
+                    }
+                };
+            }
+        } catch (ReflectiveOperationException | RuntimeException unavailable) {
+            Log.i(Entry.TAG, "Home state via launcher view visibility");
+            return null;
+        }
+    }
+
+    private boolean isWorkspaceVisible() {
+        return isVisible(workspace) && isVisible(hotseat)
+                && !isVisible(appDrawer) && !isVisible(overview);
+    }
+
+    private static boolean isVisible(View view) {
+        return view != null && view.isShown() && view.getAlpha() > 0.1f
+                && view.getGlobalVisibleRect(new Rect());
+    }
+
+    private boolean onHome() {
+        if (workspace == null || !workspace.isShown() || !root.hasWindowFocus()) return false;
+        try {
+            return homeState == null ? isWorkspaceVisible() : homeState.isNormal();
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            return isWorkspaceVisible();
         }
     }
 
