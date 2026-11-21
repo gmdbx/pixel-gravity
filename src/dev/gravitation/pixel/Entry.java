@@ -36,26 +36,32 @@ public final class Entry implements IXposedHookLoadPackage {
 
         @Override
         public void onActivityResumed(Activity activity) {
-            onActivityPaused(activity);
+            closeScreen(activity);
             if (!activity.getClass().getName().equals(TARGET + ".NexusLauncherActivity")) return;
             try {
                 screen = new GravityScreen(activity);
                 screen.startListening();
             } catch (ReflectiveOperationException | RuntimeException failure) {
                 Log.w(TAG, "Unsupported launcher layout or lifecycle", failure);
-                onActivityPaused(activity);
+                closeScreen(activity);
             }
         }
 
         @Override
         public void onActivityPaused(Activity activity) {
+            if (screen != null && screen.activity == activity && !screen.pauseForLaunch()) {
+                closeScreen(activity);
+            }
+        }
+
+        private void closeScreen(Activity activity) {
             if (screen != null && screen.activity == activity) {
                 screen.close();
                 screen = null;
             }
         }
 
-        @Override public void onActivityDestroyed(Activity activity) { onActivityPaused(activity); }
+        @Override public void onActivityDestroyed(Activity activity) { closeScreen(activity); }
         @Override public void onActivityCreated(Activity activity, Bundle state) {}
         @Override public void onActivityStarted(Activity activity) {}
         @Override public void onActivityStopped(Activity activity) {}
