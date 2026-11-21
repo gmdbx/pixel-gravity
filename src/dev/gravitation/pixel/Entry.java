@@ -36,9 +36,12 @@ public final class Entry implements IXposedHookLoadPackage {
 
         @Override
         public void onActivityResumed(Activity activity) {
-            closeScreen(activity);
             if (!activity.getClass().getName().equals(TARGET + ".NexusLauncherActivity")) return;
             try {
+                if (screen != null && screen.activity == activity && screen.resumeAfterLaunch()) {
+                    return;
+                }
+                if (screen != null) closeScreen(screen.activity);
                 screen = new GravityScreen(activity);
                 screen.startListening();
             } catch (ReflectiveOperationException | RuntimeException failure) {

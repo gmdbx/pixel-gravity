@@ -68,10 +68,17 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private Window.Callback originalCallback;
     private Window.Callback touchCallback;
     private boolean launchingApp;
+    private boolean launchPaused;
+    private boolean resumedAfterLaunch;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable finishLaunchGrace = new Runnable() {
         @Override public void run() {
+            if (launchPaused) {
+                choreographer.removeFrameCallback(GravityScreen.this);
+                return;
+            }
             launchingApp = false;
+            resumedAfterLaunch = false;
             if (onHome()) returning = true;
             else reset();
         }
@@ -119,6 +126,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 });
         window.setCallback(touchCallback);
         Log.i(Entry.TAG, "Launcher window touch callback installed");
+        registerAccelerometer();
+    }
+
+    private void registerAccelerometer() {
         Sensor accelerometer = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         if (accelerometer == null || !sensors.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME)) {
             Log.w(Entry.TAG, "Accelerometer unavailable");
@@ -127,7 +138,24 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     boolean pauseForLaunch() {
         if (!launchingApp) return false;
+        launchPaused = true;
         sensors.unregisterListener(this);
+        return true;
+    }
+
+    boolean resumeAfterLaunch() {
+        if (!launchPaused || !active) return false;
+        launchPaused = false;
+        resumedAfterLaunch = true;
+        initialized = false;
+        previousHit = 0;
+        lastFrame = 0;
+        registerAccelerometer();
+        mainHandler.removeCallbacks(finishLaunchGrace);
+        mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
+        choreographer.removeFrameCallback(this);
+        choreographer.postFrameCallback(this);
+        Log.i(Entry.TAG, "Resumed gravity after app launch");
         return true;
     }
 
@@ -208,7 +236,6 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        if (launchingApp) return;
         float impulseSquared = 0;
         for (int axis = 0; axis < 3; axis++) {
             float raw = event.values[axis];
@@ -219,7 +246,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         initialized = true;
         boolean hit = impulseSquared > SHAKE_ACCELERATION_THRESHOLD * SHAKE_ACCELERATION_THRESHOLD;
         long time = event.timestamp / 1_000_000;
-        if (hit && !aboveThreshold && time - lastToggle > 950) {
+        if (!launchingApp && hit && !aboveThreshold && time - lastToggle > 950) {
             if (previousHit != 0 && time - previousHit < 390) {
                 lastToggle = time;
                 previousHit = 0;
@@ -295,7 +322,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     @Override
     public void doFrame(long time) {
-        if (!active) return;
+        if (!active || (launchPaused && root.getWindowVisibility() != View.VISIBLE)) return;
         try {
             if ((!launchingApp && !onHome()) || !root.isAttachedToWindow()
                     || scene.getBounds().width() != root.getWidth()
@@ -383,14 +410,18 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             tap = false;
         }
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-            Body selected = action == MotionEvent.ACTION_UP && tap && active && !launchingApp && onHome()
-                    ? pressedBody : null;
+            Body selected = action == MotionEvent.ACTION_UP && tap && active
+                    && (!launchingApp || resumedAfterLaunch) && onHome() ? pressedBody : null;
             trackingTouch = false;
             pressedBody = null;
             if (selected != null && selected.view.isAttachedToWindow()
                     && selected.view.isClickable() && selected.view.isEnabled()
                     && event.getEventTime() - event.getDownTime() < ViewConfiguration.getLongPressTimeout()) {
                 launchingApp = true;
+                returning = false;
+                elapsedReturn = 0;
+                resumedAfterLaunch = false;
+                mainHandler.removeCallbacks(finishLaunchGrace);
                 mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
                 boolean handled = false;
                 try {
@@ -418,6 +449,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private void reset() {
         mainHandler.removeCallbacks(finishLaunchGrace);
         launchingApp = false;
+        launchPaused = false;
+        resumedAfterLaunch = false;
         pressedBody = null;
         choreographer.removeFrameCallback(this);
         root.getOverlay().remove(scene);
