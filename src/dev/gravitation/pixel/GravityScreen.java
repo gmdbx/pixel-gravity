@@ -35,6 +35,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
+import java.util.List;
 
 final class GravityScreen implements SensorEventListener, Choreographer.FrameCallback {
     private static final float GRAVITY_SCALE = 330f;
@@ -44,6 +45,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private static final long APP_LAUNCH_GRACE_MS = 2000;
     private static final long HOME_RESTORE_TIMEOUT_MS = 2500;
     private static final long PAGE_SETTLE_MS = 65;
+    private static final long PAGE_SWITCH_TIMEOUT_MS = 1800;
 
     final Activity activity;
     private final View root;
@@ -80,6 +82,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private long pageSwitchDeadline;
     private int lastPageScroll;
     private View scenePage;
+    private int sceneScrollX;
     private int pageBodyCount;
     private int swipeScrollOrigin;
     private int swipePageLeft;
@@ -93,12 +96,17 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private boolean launchPaused;
     private boolean resumedAfterLaunch;
     private ViewTreeObserver launchReturnObserver;
+    private ViewTreeObserver workspaceObserver;
     private final IdentityHashMap<Object, float[]> launchPositions = new IdentityHashMap<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable finishLaunchGrace = new Runnable() {
         @Override public void run() {
             if (launchPaused) {
                 parkLaunchScene();
+                return;
+            }
+            if (pageSwitchDeadline != 0) {
+                mainHandler.postDelayed(this, PAGE_SETTLE_MS);
                 return;
             }
             restoreLaunchSource();
@@ -125,6 +133,19 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                     }
                     if (launchReturnObserver != null && !launchPaused) {
                         root.postInvalidateOnAnimation();
+                    }
+                    return true;
+                }
+            };
+
+    private final ViewTreeObserver.OnPreDrawListener workspacePageListener =
+            new ViewTreeObserver.OnPreDrawListener() {
+                @Override public boolean onPreDraw() {
+                    try {
+                        syncWorkspacePage();
+                    } catch (RuntimeException failure) {
+                        reset();
+                        Log.w(Entry.TAG, "Could not follow launcher page change", failure);
                     }
                     return true;
                 }
@@ -179,6 +200,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                     }
                 });
         window.setCallback(touchCallback);
+        workspaceObserver = root.getViewTreeObserver();
+        workspaceObserver.addOnPreDrawListener(workspacePageListener);
         Log.i(Entry.TAG, "Launcher window touch callback installed");
         registerAccelerometer();
     }
@@ -201,6 +224,14 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         if (!launchPaused || !active) return;
         mainHandler.removeCallbacks(finishLaunchGrace);
         stopWatchingLaunchReturn();
+        if (scene.pageLayers.isEmpty() && scenePage != null) {
+            rememberPage(scenePage, scene.bodies.subList(0, pageBodyCount));
+        }
+        for (PageLayer layer : scene.pageLayers.values()) {
+            rememberPage(layer.page, layer.bodies);
+        }
+        pagingTouch = false;
+        pageSwitchDeadline = 0;
         for (Body body : scene.bodies) {
             launchPositions.put(body.key, new float[]{body.x, body.y, body.vx, body.vy});
         }
@@ -262,6 +293,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     void close() {
+        if (workspaceObserver != null && workspaceObserver.isAlive()) {
+            workspaceObserver.removeOnPreDrawListener(workspacePageListener);
+        }
         Window window = activity.getWindow();
         if (touchCallback != null && window.getCallback() == touchCallback) {
             window.setCallback(originalCallback);
@@ -385,6 +419,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         int[] rootPosition = new int[2];
         root.getLocationOnScreen(rootPosition);
         scenePage = visiblePage();
+        sceneScrollX = workspace != null ? workspace.getScrollX() : 0;
         collect(scenePage != null ? scenePage : workspace, rootPosition, scene.bodies, true);
         pageBodyCount = scene.bodies.size();
         collect(hotseat, rootPosition, scene.bodies, true);
@@ -627,9 +662,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         if (pagingTouch) {
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 pagingTouch = false;
-                pageSettledAt = SystemClock.uptimeMillis();
-                pageSwitchDeadline = pageSettledAt + 1800;
-                lastPageScroll = workspace.getScrollX();
+                waitForPageToSettle();
             }
             return false;
         }
@@ -730,13 +763,45 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         if (view.getTranslationY() == source.targetY) view.setTranslationY(source.originalY);
     }
 
-    private void passPageSwipe() {
-        swipeScrollOrigin = workspace.getScrollX();
+    private void syncWorkspacePage() {
+        if (!active || scenePage == null || launchSource != null
+                || root.getWindowVisibility() != View.VISIBLE) return;
+        if (pagingTouch || pageSwitchDeadline != 0) {
+            prepareNearbyPages();
+            return;
+        }
+        int scrollDelta = workspace.getScrollX() - sceneScrollX;
+        View visible = visiblePage();
+        if (visible == null || (scrollDelta == 0 && visible == scenePage)) return;
+
+        beginPageSwitch();
+        prepareNearbyPages();
+        if (visible != scenePage && Math.abs(scrollDelta) >= workspace.getWidth() * 0.75f) {
+            // Quickstep can snap straight to the default page on return from an app.
+            finishPageSwipe();
+        } else {
+            waitForPageToSettle();
+        }
+        scene.invalidateSelf();
+    }
+
+    private void beginPageSwitch() {
+        swipeScrollOrigin = sceneScrollX;
         swipePageLeft = scenePage.getLeft();
         PageLayer outgoing = new PageLayer(scenePage);
         outgoing.bodies.addAll(scene.bodies.subList(0, pageBodyCount));
         scene.bodies.subList(0, pageBodyCount).clear();
         scene.pageLayers.put(scenePage, outgoing);
+    }
+
+    private void waitForPageToSettle() {
+        pageSettledAt = SystemClock.uptimeMillis();
+        pageSwitchDeadline = pageSettledAt + PAGE_SWITCH_TIMEOUT_MS;
+        lastPageScroll = workspace.getScrollX();
+    }
+
+    private void passPageSwipe() {
+        beginPageSwitch();
         mainHandler.removeCallbacks(finishLaunchGrace);
         launchingApp = false;
         resumedAfterLaunch = false;
@@ -781,7 +846,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     private void updatePageSwipe(float dt) {
-        if (!onHome() || !root.isAttachedToWindow()) {
+        boolean homeVisible = onHome() || (launchingApp
+                && root.getWindowVisibility() == View.VISIBLE
+                && (isHomeLayout() || isWorkspaceVisible()));
+        if (!homeVisible || !root.isAttachedToWindow()) {
             reset();
             return;
         }
@@ -805,12 +873,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         PageLayer incoming = scene.pageLayers.get(selected);
         for (PageLayer layer : scene.pageLayers.values()) {
             if (layer == incoming) continue;
-            IdentityHashMap<Object, float[]> positions = new IdentityHashMap<>();
-            for (Body body : layer.bodies) {
-                positions.put(body.key, new float[]{body.x, body.y, body.vx, body.vy});
-                restoreVisibility(body);
-            }
-            pagePositions.put(layer.page, positions);
+            rememberPage(layer.page, layer.bodies);
+            for (Body body : layer.bodies) restoreVisibility(body);
         }
         pageBodyCount = incoming == null ? 0 : incoming.bodies.size();
         if (incoming != null) {
@@ -823,8 +887,15 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
         scene.pageLayers.clear();
         scenePage = selected;
+        sceneScrollX = workspace.getScrollX();
         preparedPage = null;
         pageSwitchDeadline = 0;
+    }
+
+    private void rememberPage(View page, List<Body> bodies) {
+        IdentityHashMap<Object, float[]> positions = new IdentityHashMap<>();
+        for (Body body : bodies) positions.put(body.key, new float[]{body.x, body.y, body.vx, body.vy});
+        pagePositions.put(page, positions);
     }
 
     private void recycleSwipeStart() {
