@@ -33,8 +33,8 @@ public final class Entry implements IXposedHookLoadPackage {
                                     GravityScreen screen = lifecycle.screen;
                                     MotionEvent event = (MotionEvent) touch.args[0];
                                     if (screen != null && screen.activity == touch.thisObject
-                                            && event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                                        screen.cancelAnimation();
+                                            && screen.handleTouch(event)) {
+                                        touch.setResult(true);
                                     }
                                 }
                             });

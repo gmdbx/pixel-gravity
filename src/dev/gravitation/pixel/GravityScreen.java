@@ -15,9 +15,11 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.util.Log;
 import android.view.Choreographer;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewConfiguration;
 import android.view.WindowInsets;
 
 import java.lang.reflect.Field;
@@ -25,6 +27,8 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 
 final class GravityScreen implements SensorEventListener, Choreographer.FrameCallback {
+    private static final float GRAVITY_SCALE = 245f;
+
     final Activity activity;
     private final View root;
     private final View workspace;
@@ -47,11 +51,17 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private long lastToggle;
     private long lastFrame;
     private float elapsedReturn;
+    private final int touchSlop;
+    private boolean trackingTouch;
+    private boolean tap;
+    private float downX, downY;
+    private Body pressedBody;
 
     GravityScreen(Activity activity) throws ReflectiveOperationException {
         this.activity = activity;
         root = activity.getWindow().getDecorView();
         density = root.getResources().getDisplayMetrics().density;
+        touchSlop = ViewConfiguration.get(activity).getScaledTouchSlop();
         workspace = findView("workspace");
         hotseat = findView("hotseat");
         ClassLoader loader = activity.getClassLoader();
@@ -286,8 +296,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         float step = dt / 3;
         for (int part = 0; part < 3; part++) {
             for (Body body : scene.bodies) {
-                body.vx = (body.vx + gx * 145 * density * step) * 0.987f;
-                body.vy = (body.vy + gy * 145 * density * step) * 0.987f;
+                body.vx = (body.vx + gx * GRAVITY_SCALE * density * step) * 0.987f;
+                body.vy = (body.vy + gy * GRAVITY_SCALE * density * step) * 0.987f;
                 body.x += body.vx * step;
                 body.y += body.vy * step;
             }
@@ -299,11 +309,53 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
     }
 
-    void cancelAnimation() {
-        if (active) reset();
+    boolean handleTouch(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            trackingTouch = active;
+            if (!trackingTouch) return false;
+            downX = event.getRawX();
+            downY = event.getRawY();
+            int[] origin = new int[2];
+            root.getLocationOnScreen(origin);
+            pressedBody = findBodyAt(downX - origin[0], downY - origin[1]);
+            tap = true;
+            return true;
+        }
+        if (!trackingTouch) return false;
+
+        float dx = event.getRawX() - downX;
+        float dy = event.getRawY() - downY;
+        if (action == MotionEvent.ACTION_POINTER_DOWN || dx * dx + dy * dy > touchSlop * touchSlop) {
+            tap = false;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            Body selected = action == MotionEvent.ACTION_UP && tap && active && onHome()
+                    ? pressedBody : null;
+            trackingTouch = false;
+            pressedBody = null;
+            if (active && action == MotionEvent.ACTION_UP) reset();
+            if (selected != null && selected.view.isAttachedToWindow()
+                    && selected.view.isClickable() && selected.view.isEnabled()) {
+                selected.view.performClick();
+            }
+        }
+        return true;
+    }
+
+    private Body findBodyAt(float x, float y) {
+        // Match the draw order where the bounds of two moving icons overlap.
+        for (int index = scene.bodies.size() - 1; index >= 0; index--) {
+            Body body = scene.bodies.get(index);
+            if (Math.abs(x - body.x) <= body.width / 2f && Math.abs(y - body.y) <= body.height / 2f) {
+                return body;
+            }
+        }
+        return null;
     }
 
     private void reset() {
+        pressedBody = null;
         choreographer.removeFrameCallback(this);
         root.getOverlay().remove(scene);
         for (Body body : scene.bodies) {
