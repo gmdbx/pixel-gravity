@@ -32,6 +32,7 @@ import java.util.ArrayList;
 
 final class GravityScreen implements SensorEventListener, Choreographer.FrameCallback {
     private static final float GRAVITY_SCALE = 330f;
+    private static final float SHAKE_ACCELERATION_THRESHOLD = 13.5f; // m/s²
 
     final Activity activity;
     private final View root;
@@ -196,7 +197,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             impulseSquared += impulse * impulse;
         }
         initialized = true;
-        boolean hit = impulseSquared > 85;
+        boolean hit = impulseSquared > SHAKE_ACCELERATION_THRESHOLD * SHAKE_ACCELERATION_THRESHOLD;
         long time = event.timestamp / 1_000_000;
         if (hit && !aboveThreshold && time - lastToggle > 950) {
             if (previousHit != 0 && time - previousHit < 390) {
