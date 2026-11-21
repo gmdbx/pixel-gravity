@@ -66,6 +66,9 @@ public final class Entry implements IXposedHookLoadPackage {
 
         @Override public void onActivityDestroyed(Activity activity) { closeScreen(activity); }
         @Override public void onActivityCreated(Activity activity, Bundle state) {}
+        @Override public void onActivityPreStarted(Activity activity) {
+            if (screen != null && screen.activity == activity) screen.prepareLaunchReturn();
+        }
         @Override public void onActivityStarted(Activity activity) {}
         @Override public void onActivityStopped(Activity activity) {
             if (screen != null && screen.activity == activity) screen.parkLaunchScene();

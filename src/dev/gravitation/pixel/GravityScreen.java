@@ -23,6 +23,7 @@ import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.ViewConfiguration;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -91,7 +92,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private LaunchSource launchSource;
     private boolean launchPaused;
     private boolean resumedAfterLaunch;
-    private long restoreDeadline;
+    private ViewTreeObserver launchReturnObserver;
     private final IdentityHashMap<Object, float[]> launchPositions = new IdentityHashMap<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable finishLaunchGrace = new Runnable() {
@@ -107,6 +108,27 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             else reset();
         }
     };
+
+    private final Runnable expireLaunchReturn = new Runnable() {
+        @Override public void run() {
+            Log.i(Entry.TAG, "Home did not become ready to restore gravity after app launch");
+            reset();
+        }
+    };
+
+    private final ViewTreeObserver.OnPreDrawListener launchReturnListener =
+            new ViewTreeObserver.OnPreDrawListener() {
+                @Override public boolean onPreDraw() {
+                    if (root.getWindowVisibility() == View.VISIBLE
+                            && (isHomeLayout() || isWorkspaceVisible())) {
+                        restoreLaunchScene();
+                    }
+                    if (launchReturnObserver != null && !launchPaused) {
+                        root.postInvalidateOnAnimation();
+                    }
+                    return true;
+                }
+            };
 
     GravityScreen(Activity activity) throws ReflectiveOperationException {
         this.activity = activity;
@@ -177,24 +199,66 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     void parkLaunchScene() {
         if (!launchPaused || !active) return;
+        mainHandler.removeCallbacks(finishLaunchGrace);
+        stopWatchingLaunchReturn();
         for (Body body : scene.bodies) {
             launchPositions.put(body.key, new float[]{body.x, body.y, body.vx, body.vy});
         }
         removeScene();
     }
 
+    void prepareLaunchReturn() {
+        if (launchPositions.isEmpty()) return;
+        if (launchReturnObserver == null || !launchReturnObserver.isAlive()) {
+            launchReturnObserver = root.getViewTreeObserver();
+            launchReturnObserver.addOnPreDrawListener(launchReturnListener);
+        }
+        root.invalidate();
+    }
+
+    private void stopWatchingLaunchReturn() {
+        if (launchReturnObserver != null && launchReturnObserver.isAlive()) {
+            launchReturnObserver.removeOnPreDrawListener(launchReturnListener);
+        }
+        launchReturnObserver = null;
+        mainHandler.removeCallbacks(expireLaunchReturn);
+    }
+
+    private void restoreLaunchScene() {
+        try {
+            begin();
+            if (!active) return;
+            launchPositions.clear();
+            stopWatchingLaunchReturn();
+            if (!launchPaused) startReturnGrace();
+            Log.i(Entry.TAG, "Rebuilt gravity before drawing the home screen");
+        } catch (RuntimeException failure) {
+            reset();
+            Log.w(Entry.TAG, "Could not restore gravity after app launch", failure);
+        }
+    }
+
     boolean resumeAfterLaunch() {
-        if (!launchPaused) return false;
-        parkLaunchScene();
-        if (launchPositions.isEmpty()) return false;
+        if (!launchPaused || (!active && launchPositions.isEmpty())) return false;
         launchPaused = false;
+        restoreLaunchSource();
         initialized = false;
         previousHit = 0;
+        lastFrame = 0;
         registerAccelerometer();
         mainHandler.removeCallbacks(finishLaunchGrace);
-        restoreDeadline = SystemClock.uptimeMillis() + HOME_RESTORE_TIMEOUT_MS;
-        choreographer.postFrameCallback(this);
+        if (active) {
+            startReturnGrace();
+        } else {
+            prepareLaunchReturn();
+            mainHandler.postDelayed(expireLaunchReturn, HOME_RESTORE_TIMEOUT_MS);
+        }
         return true;
+    }
+
+    private void startReturnGrace() {
+        resumedAfterLaunch = true;
+        mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
     }
 
     void close() {
@@ -262,7 +326,11 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     private boolean onHome() {
-        if (workspace == null || !workspace.isShown() || !root.hasWindowFocus()) return false;
+        return root.hasWindowFocus() && isHomeLayout();
+    }
+
+    private boolean isHomeLayout() {
+        if (workspace == null || !workspace.isShown()) return false;
         try {
             return homeState == null ? isWorkspaceVisible() : homeState.isNormal();
         } catch (ReflectiveOperationException | RuntimeException failure) {
@@ -450,27 +518,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     public void doFrame(long time) {
         try {
             if (pagingTouch || pageSwitchDeadline != 0) {
-                updatePageSwipe();
-                return;
-            }
-            if (restoreDeadline != 0) {
-                if (SystemClock.uptimeMillis() >= restoreDeadline) {
-                    Log.i(Entry.TAG, "Home did not become ready to restore gravity after app launch");
-                    reset();
-                } else if (onHome()) {
-                    restoreDeadline = 0;
-                    begin();
-                    launchPositions.clear();
-                    if (active) {
-                        resumedAfterLaunch = true;
-                        mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
-                        Log.i(Entry.TAG, "Rebuilt gravity scene after app launch");
-                    } else {
-                        reset();
-                    }
-                } else {
-                    choreographer.postFrameCallback(this);
-                }
+                updatePageSwipe(frameDelta(time));
                 return;
             }
             if (!active) return;
@@ -484,8 +532,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 reset();
                 return;
             }
-            float dt = lastFrame == 0 ? 1f / 60f : Math.min((time - lastFrame) / 1e9f, 0.032f);
-            lastFrame = time;
+            float dt = frameDelta(time);
             if (returning) {
                 elapsedReturn += dt;
                 float fraction = Math.min(1, dt / Math.max(dt, 0.24f - elapsedReturn));
@@ -506,6 +553,12 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             reset();
             Log.w(Entry.TAG, "Gravity animation stopped", failure);
         }
+    }
+
+    private float frameDelta(long time) {
+        float dt = lastFrame == 0 ? 1f / 60f : Math.min((time - lastFrame) / 1e9f, 0.032f);
+        lastFrame = time;
+        return dt;
     }
 
     private void animate(float dt) {
@@ -531,8 +584,18 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         float damping = (float) Math.pow(0.987f, step * 180);
         float maxSpeed = MAX_SPEED_DP_PER_SECOND * density;
         Body opening = launchSource != null ? launchSource.body : null;
+        advanceBodies(scene.bodies, opening, gx, gy, step, damping, maxSpeed);
+        for (PageLayer layer : scene.pageLayers.values()) {
+            if (Math.abs(pageOffset(layer.page)) < root.getWidth()) {
+                advanceBodies(layer.bodies, null, gx, gy, step, damping, maxSpeed);
+            }
+        }
+    }
+
+    private void advanceBodies(ArrayList<Body> bodies, Body opening, float gx, float gy,
+                               float step, float damping, float maxSpeed) {
         for (int part = 0; part < 3; part++) {
-            for (Body body : scene.bodies) {
+            for (Body body : bodies) {
                 if (body == opening) continue;
                 body.vx = (body.vx + gx * GRAVITY_SCALE * density * step) * damping;
                 body.vy = (body.vy + gy * GRAVITY_SCALE * density * step) * damping;
@@ -545,15 +608,15 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 body.x += body.vx * step;
                 body.y += body.vy * step;
             }
-            for (int i = 0; i < scene.bodies.size(); i++) {
-                Body body = scene.bodies.get(i);
+            for (int i = 0; i < bodies.size(); i++) {
+                Body body = bodies.get(i);
                 if (body == opening) continue;
                 for (int j = 0; j < i; j++) {
-                    Body other = scene.bodies.get(j);
+                    Body other = bodies.get(j);
                     if (other != opening) body.collide(other);
                 }
             }
-            for (Body body : scene.bodies) {
+            for (Body body : bodies) {
                 if (body != opening) body.constrain(arena);
             }
         }
@@ -717,12 +780,13 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
     }
 
-    private void updatePageSwipe() {
+    private void updatePageSwipe(float dt) {
         if (!onHome() || !root.isAttachedToWindow()) {
             reset();
             return;
         }
         prepareNearbyPages();
+        animate(dt);
         if (!pagingTouch) {
             long now = SystemClock.uptimeMillis();
             int currentScroll = workspace.getScrollX();
@@ -761,7 +825,6 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         scenePage = selected;
         preparedPage = null;
         pageSwitchDeadline = 0;
-        lastFrame = 0;
     }
 
     private void recycleSwipeStart() {
@@ -788,7 +851,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         launchPaused = false;
         resumedAfterLaunch = false;
         pressedBody = null;
-        restoreDeadline = 0;
+        stopWatchingLaunchReturn();
         pageSwitchDeadline = 0;
         recycleSwipeStart();
         pagePositions.clear();
