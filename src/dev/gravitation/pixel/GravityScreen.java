@@ -509,6 +509,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     private void prepareSceneVisibility() {
+        if (scene.liveViews) scene.keepParentsUnclipped();
         updateOriginalVisibility(scene.bodies);
         for (PageLayer layer : scene.pageLayers.values()) {
             updateOriginalVisibility(layer.bodies);
@@ -1137,9 +1138,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                         && parent != root; parent = parent.getParent()) {
                     ViewGroup group = (ViewGroup) parent;
                     if (clipping.containsKey(group)) continue;
-                    clipping.put(group, new ClipState(group));
-                    group.setClipChildren(false);
-                    group.setClipToPadding(false);
+                    ClipState state = new ClipState();
+                    clipping.put(group, state);
+                    state.unclip(group);
                 }
             }
             offset[0] = body.x - body.homeX;
@@ -1152,12 +1153,12 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             body.translation.apply(view, offset[0], offset[1]);
         }
 
+        void keepParentsUnclipped() {
+            for (ViewGroup group : clipping.keySet()) clipping.get(group).unclip(group);
+        }
+
         void restoreClipping() {
-            for (ViewGroup group : clipping.keySet()) {
-                ClipState saved = clipping.get(group);
-                group.setClipChildren(saved.children);
-                group.setClipToPadding(saved.padding);
-            }
+            for (ViewGroup group : clipping.keySet()) clipping.get(group).restore(group);
             clipping.clear();
         }
 
@@ -1196,11 +1197,35 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     private static final class ClipState {
-        final boolean children, padding;
+        boolean children, padding, outline;
+        Rect bounds;
 
-        ClipState(ViewGroup group) {
-            children = group.getClipChildren();
-            padding = group.getClipToPadding();
+        void unclip(ViewGroup group) {
+            // Quickstep can reapply clipping when the close animation finishes.
+            if (group.getClipChildren()) {
+                children = true;
+                group.setClipChildren(false);
+            }
+            if (group.getClipToPadding()) {
+                padding = true;
+                group.setClipToPadding(false);
+            }
+            if (group.getClipToOutline()) {
+                outline = true;
+                group.setClipToOutline(false);
+            }
+            Rect current = group.getClipBounds();
+            if (current != null) {
+                bounds = current;
+                group.setClipBounds(null);
+            }
+        }
+
+        void restore(ViewGroup group) {
+            if (children) group.setClipChildren(true);
+            if (padding) group.setClipToPadding(true);
+            if (outline) group.setClipToOutline(true);
+            if (bounds != null && group.getClipBounds() == null) group.setClipBounds(bounds);
         }
     }
 

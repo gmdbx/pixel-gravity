@@ -1,5 +1,6 @@
 package dev.gravitation.pixel;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -12,11 +13,14 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -34,6 +38,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.function.IntConsumer;
 
 public final class UpdateActivity extends Activity {
     private static final String API = "https://api.github.com/repos/gmdbx/pixel-gravity/releases?per_page=20";
@@ -43,6 +48,7 @@ public final class UpdateActivity extends Activity {
     private TextView title;
     private TextView detail;
     private Button primary;
+    private ProgressBar progress;
     private Button secondary;
     private String currentVersion;
 
@@ -55,6 +61,13 @@ public final class UpdateActivity extends Activity {
             return;
         }
         createCard();
+        UpdateCheckJob.schedule(this);
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                && !getPreferences(MODE_PRIVATE).getBoolean("asked_for_notifications", false)) {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("asked_for_notifications", true).apply();
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+        }
         check(false);
     }
 
@@ -90,6 +103,12 @@ public final class UpdateActivity extends Activity {
         detail.setTextSize(15);
         detail.setPadding(0, dp(8), 0, dp(16));
         card.addView(detail);
+        progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progress.setProgressTintList(ColorStateList.valueOf(accent));
+        progress.setIndeterminateTintList(ColorStateList.valueOf(accent));
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(-1, dp(6));
+        progressParams.bottomMargin = dp(18);
+        card.addView(progress, progressParams);
         LinearLayout actions = new LinearLayout(this);
         card.addView(actions, new LinearLayout.LayoutParams(-1, -2));
         primary = actionButton(accent, onAccent);
@@ -126,6 +145,7 @@ public final class UpdateActivity extends Activity {
             String other, Runnable otherAction) {
         title.setText(heading);
         detail.setText(description);
+        progress.setVisibility(View.GONE);
         primary.setText(button);
         primary.setEnabled(action != null);
         primary.setOnClickListener(action == null ? null : view -> action.run());
@@ -137,7 +157,7 @@ public final class UpdateActivity extends Activity {
         show("Pixel Gravity", "Проверяю обновления…", "Проверка", null, "Закрыть", this::finish);
         new Thread(() -> {
             try {
-                String version = newestRelease();
+                String version = newestRelease(currentVersion);
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
                     if (version == null) {
@@ -162,10 +182,10 @@ public final class UpdateActivity extends Activity {
         }, "PixelGravityReleaseCheck").start();
     }
 
-    private String newestRelease() throws Exception {
+    static String newestRelease(String currentVersion) throws Exception {
         ByteArrayOutputStream response = new ByteArrayOutputStream();
         try (InputStream input = open(API)) {
-            copy(input, response, 2 * 1024 * 1024);
+            copy(input, response, 2 * 1024 * 1024, null);
         }
         JSONArray releases = new JSONArray(new String(response.toByteArray(), StandardCharsets.UTF_8));
         String latest = currentVersion;
@@ -200,14 +220,25 @@ public final class UpdateActivity extends Activity {
 
     private void download(String version) {
         show("Загрузка обновления", "Версия " + version, "Загрузка", null, "Закрыть", this::finish);
+        progress.setIndeterminate(true);
+        progress.setVisibility(View.VISIBLE);
         new Thread(() -> {
             File temporary = null;
             try {
                 temporary = File.createTempFile("update-", ".apk", getCacheDir());
-                try (InputStream input = open(DOWNLOAD + "v" + version + "/PixelGravity.apk");
+                HttpURLConnection connection = connect(DOWNLOAD + "v" + version + "/PixelGravity.apk");
+                try (InputStream input = open(connection);
                         FileOutputStream output = new FileOutputStream(temporary)) {
-                    copy(input, output, APK_LIMIT);
+                    long length = connection.getContentLengthLong();
+                    if (length > APK_LIMIT) throw new IOException("APK exceeds size limit");
+                    copy(input, output, APK_LIMIT, length > 0 ? progressReporter(version, length) : null);
                 }
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        detail.setText("Проверяю подпись APK…");
+                        progress.setIndeterminate(true);
+                    }
+                });
                 verifyApk(temporary, version);
                 if (!temporary.renameTo(new File(getCacheDir(), "PixelGravity.apk"))) {
                     throw new IOException("Cannot save update");
@@ -224,6 +255,24 @@ public final class UpdateActivity extends Activity {
                 if (temporary != null) temporary.delete();
             }
         }, "PixelGravityApkDownload").start();
+    }
+
+    private IntConsumer progressReporter(String version, long length) {
+        return new IntConsumer() {
+            private int last = -1;
+
+            @Override public void accept(int received) {
+                int percent = (int) Math.min(100, received * 100L / length);
+                if (percent == last) return;
+                last = percent;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    progress.setIndeterminate(false);
+                    progress.setProgress(percent);
+                    detail.setText("Версия " + version + " · " + percent + "%");
+                });
+            }
+        };
     }
 
     private void verifyApk(File apk, String version) throws Exception {
@@ -278,10 +327,18 @@ public final class UpdateActivity extends Activity {
     }
 
     private static InputStream open(String address) throws IOException {
+        return open(connect(address));
+    }
+
+    private static HttpURLConnection connect(String address) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
         connection.setConnectTimeout(10000);
         connection.setReadTimeout(15000);
         connection.setRequestProperty("User-Agent", "PixelGravity-Updater");
+        return connection;
+    }
+
+    private static InputStream open(HttpURLConnection connection) throws IOException {
         try {
             return new FilterInputStream(connection.getInputStream()) {
                 @Override public void close() throws IOException {
@@ -298,13 +355,16 @@ public final class UpdateActivity extends Activity {
         }
     }
 
-    private static void copy(InputStream input, OutputStream output, int limit) throws IOException {
+    private static void copy(InputStream input, OutputStream output, int limit, IntConsumer progress)
+            throws IOException {
+        if (progress != null) progress.accept(0);
         byte[] buffer = new byte[8192];
         int total = 0;
         for (int size; (size = input.read(buffer)) != -1; ) {
             total += size;
             if (total > limit) throw new IOException("Download exceeded size limit");
             output.write(buffer, 0, size);
+            if (progress != null) progress.accept(total);
         }
     }
 }
