@@ -69,6 +69,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private final Rect arena = new Rect();
     private final Rect workspaceArena = new Rect();
     private final Rect dockArena = new Rect();
+    private final Rect searchArena = new Rect();
     private int boundsWidth, boundsHeight;
     private final float[] filtered = new float[3];
     private boolean initialized;
@@ -493,7 +494,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 try {
                     // Capture live content even when the hotseat is still sliding into view.
                     body = new Body(view, scene.liveViews, root.isHardwareAccelerated(), parked.homeX,
-                            parked.homeY, density, parked.rectangular, isDockItem(view));
+                            parked.homeY, density, parked.rectangular, zoneFor(view));
                     scene.bodies.add(body);
                 } catch (RuntimeException failure) {
                     Log.w(Entry.TAG, "Could not redraw a parked launcher item", failure);
@@ -531,7 +532,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             try {
                 for (Body item : scene.bodies) {
                     candidate.bodies.add(new Body(item.view, false, root.isHardwareAccelerated(),
-                            item.homeX, item.homeY, density, item.rectangular, item.inDock));
+                            item.homeX, item.homeY, density, item.rectangular, item.zone));
                 }
             } catch (RuntimeException failure) {
                 returnOverlayTime = Long.MAX_VALUE;
@@ -665,14 +666,17 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
     }
 
-    private boolean isDockItem(View view) {
+    private enum Zone { WORKSPACE, DOCK, SEARCH }
+
+    private Zone zoneFor(View view) {
         int searchId = launcherBarIds[0];
-        if (view == dockSearch || (searchId != 0 && view.getId() == searchId)) return true;
+        if (view == dockSearch || (searchId != 0 && view.getId() == searchId)
+                || view.getClass().getSimpleName().equals("HotseatQsb")) return Zone.SEARCH;
         for (ViewParent parent = view.getParent(); parent != null; parent = parent.getParent()) {
-            if (parent == hotseat) return true;
+            if (parent == hotseat) return Zone.DOCK;
             if (parent == workspace || parent == root) break;
         }
-        return false;
+        return Zone.WORKSPACE;
     }
 
     private void configureGravityBounds(int rootTop) {
@@ -684,25 +688,45 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         boundsHeight = height;
         workspaceArena.set(arena);
         dockArena.set(arena);
+        searchArena.set(arena);
 
         int dockTop = arena.bottom;
+        int searchTop = arena.bottom;
         int tallestDockItem = 0;
+        int tallestSearchItem = 0;
         for (Body body : scene.bodies) {
-            if (body.inDock) {
-                dockTop = Math.min(dockTop, Math.round(body.homeY - body.height / 2f));
+            int top = Math.round(body.homeY - body.height / 2f);
+            if (body.zone == Zone.DOCK) {
+                dockTop = Math.min(dockTop, top);
                 tallestDockItem = Math.max(tallestDockItem, body.height);
+            } else if (body.zone == Zone.SEARCH) {
+                searchTop = Math.min(searchTop, top);
+                tallestSearchItem = Math.max(tallestSearchItem, body.height);
             }
         }
-        if (dockTop == arena.bottom) return;
+        if (tallestDockItem == 0 && tallestSearchItem == 0) return;
+
+        int gap = Math.max(0, Math.min(Math.round(DOCK_GAP_DP * density),
+                (arena.height() - tallestDockItem - tallestSearchItem - 1) / 2));
         int[] position = new int[2];
-        if (hotseat != null && hotseat.getHeight() > 0) {
+        if (tallestDockItem > 0 && hotseat != null && hotseat.getHeight() > 0) {
             hotseat.getLocationOnScreen(position);
             int layoutTop = position[1] - rootTop;
             if (layoutTop > arena.centerY()) dockTop = Math.min(dockTop, layoutTop);
         }
-        dockArena.top = Math.max(arena.top, Math.min(dockTop, arena.bottom - tallestDockItem));
-        workspaceArena.bottom = Math.max(arena.top + 1,
-                dockArena.top - Math.round(DOCK_GAP_DP * density));
+        if (tallestSearchItem > 0) {
+            int lowestSearchTop = arena.bottom - tallestSearchItem;
+            int earliestSearchTop = tallestDockItem > 0
+                    ? dockTop + tallestDockItem + gap : arena.top;
+            searchArena.top = Math.max(arena.top,
+                    Math.min(lowestSearchTop, Math.max(searchTop, earliestSearchTop)));
+            dockArena.bottom = searchArena.top - gap;
+        }
+        if (tallestDockItem > 0) {
+            dockArena.top = Math.max(arena.top, Math.min(dockTop, dockArena.bottom - tallestDockItem));
+        }
+        int panelTop = tallestDockItem > 0 ? dockArena.top : searchArena.top;
+        workspaceArena.bottom = Math.max(arena.top + 1, panelTop - gap);
         for (int i = 0; i < pageBodyCount; i++) {
             Body body = scene.bodies.get(i);
             if (!(body.view.getParent() instanceof View)) continue;
@@ -714,11 +738,16 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 workspaceArena.bottom = Math.min(workspaceArena.bottom, gridBottom);
             }
         }
-        Log.i(Entry.TAG, "Workspace bottom " + workspaceArena.bottom + ", dock top " + dockArena.top);
+        Log.i(Entry.TAG, "Workspace bottom " + workspaceArena.bottom + ", dock " + dockArena.top
+                + "–" + dockArena.bottom + ", search top " + searchArena.top);
     }
 
     private void constrainBody(Body body) {
-        body.constrain(body.inDock ? dockArena : workspaceArena);
+        switch (body.zone) {
+            case DOCK: body.constrain(dockArena); break;
+            case SEARCH: body.constrain(searchArena); break;
+            default: body.constrain(workspaceArena);
+        }
     }
 
     private void restorePosition(Body body, float[] position) {
@@ -756,7 +785,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             if (!arena.contains((int) centerX, (int) centerY)) return;
             try {
                 bodies.add(new Body(view, scene.liveViews, root.isHardwareAccelerated(),
-                        centerX, centerY, density, rectangular, isDockItem(view)));
+                        centerX, centerY, density, rectangular, zoneFor(view)));
             } catch (RuntimeException failure) {
                 Log.w(Entry.TAG, "Could not capture launcher item", failure);
             }
@@ -867,7 +896,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 if (body == opening) continue;
                 for (int j = 0; j < i; j++) {
                     Body other = bodies.get(j);
-                    if (other != opening && body.inDock == other.inDock) body.collide(other);
+                    if (other != opening && body.zone == other.zone) body.collide(other);
                 }
             }
             for (Body body : bodies) {
@@ -1399,7 +1428,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final RenderNode renderNode;
         final int width, height;
         final boolean rectangular;
-        final boolean inDock;
+        final Zone zone;
         final Object key;
         final float transitionAlpha, radius, bounceThreshold, contactSlop;
         float homeX, homeY, x, y, vx, vy;
@@ -1407,10 +1436,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         LiveTranslation translation;
 
         Body(View view, boolean liveView, boolean hardwareAccelerated, float centerX, float centerY,
-                float density, boolean rectangular, boolean inDock) {
+                float density, boolean rectangular, Zone zone) {
             this.view = view;
             this.rectangular = rectangular;
-            this.inDock = inDock;
+            this.zone = zone;
             width = view.getWidth();
             height = view.getHeight();
             if (liveView) {
