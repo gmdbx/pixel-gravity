@@ -62,6 +62,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private final SensorManager sensors;
     private final Choreographer choreographer = Choreographer.getInstance();
     private Scene scene;
+    private Scene returnOverlay;
+    private long returnOverlayTime;
     private final float density;
     private final Rect arena = new Rect();
     private final float[] filtered = new float[3];
@@ -146,6 +148,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                     try {
                         syncWorkspacePage();
                         if (active && launchSource == null) {
+                            switchReturnRenderer();
                             prepareSceneVisibility();
                         }
                     } catch (RuntimeException failure) {
@@ -305,6 +308,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     private void startReturnGrace() {
         resumedAfterLaunch = true;
+        returnOverlayTime = SystemClock.uptimeMillis() + 180;
         mainHandler.postDelayed(finishLaunchGrace, APP_LAUNCH_GRACE_MS);
     }
 
@@ -506,6 +510,72 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private static Object itemKey(View view) {
         Object tag = view.getTag();
         return tag != null ? tag : view;
+    }
+
+    private void switchReturnRenderer() {
+        if (!scene.liveViews || !resumedAfterLaunch || !onHome() || returning
+                || pagingTouch || pageSwitchDeadline != 0
+                || SystemClock.uptimeMillis() < returnOverlayTime) {
+            discardReturnOverlay();
+            return;
+        }
+
+        if (returnOverlay == null) {
+            Scene candidate = new Scene(false);
+            try {
+                for (Body item : scene.bodies) {
+                    candidate.bodies.add(new Body(item.view, false, root.isHardwareAccelerated(),
+                            item.homeX, item.homeY, density, item.rectangular));
+                }
+            } catch (RuntimeException failure) {
+                returnOverlayTime = Long.MAX_VALUE;
+                Log.w(Entry.TAG, "Could not prepare the resumed drawing layer", failure);
+                return;
+            }
+            candidate.probing = true;
+            candidate.setBounds(scene.getBounds());
+            root.getOverlay().add(candidate);
+            returnOverlay = candidate;
+            root.postInvalidateOnAnimation();
+            return;
+        }
+        if (!returnOverlay.canvasReady) {
+            returnOverlay.invalidateSelf();
+            return;
+        }
+        if (returnOverlay.bodies.size() != scene.bodies.size()) {
+            discardReturnOverlay();
+            return;
+        }
+        for (int i = 0; i < scene.bodies.size(); i++) {
+            if (returnOverlay.bodies.get(i).view != scene.bodies.get(i).view
+                    || !returnOverlay.canDraw(returnOverlay.bodies.get(i))) {
+                discardReturnOverlay();
+                returnOverlayTime = Long.MAX_VALUE;
+                return;
+            }
+        }
+        for (int i = 0; i < scene.bodies.size(); i++) {
+            Body live = scene.bodies.get(i);
+            Body image = returnOverlay.bodies.get(i);
+            image.x = live.x;
+            image.y = live.y;
+            image.vx = live.vx;
+            image.vy = live.vy;
+            restoreVisibility(live);
+        }
+        scene.restoreClipping();
+        scene = returnOverlay;
+        returnOverlay = null;
+        scene.probing = false;
+        scene.invalidateSelf();
+        Log.i(Entry.TAG, "Moved resumed gravity to the unclipped drawing layer");
+    }
+
+    private void discardReturnOverlay() {
+        if (returnOverlay == null) return;
+        root.getOverlay().remove(returnOverlay);
+        returnOverlay = null;
     }
 
     private void prepareSceneVisibility() {
@@ -1044,6 +1114,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     private void removeScene() {
+        discardReturnOverlay();
         restoreLaunchSource();
         choreographer.removeFrameCallback(this);
         root.getOverlay().remove(scene);
@@ -1123,6 +1194,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final Matrix inverseMatrix = new Matrix();
         final float[] offset = new float[2];
         boolean hardwareCanvas;
+        boolean probing;
+        boolean canvasReady;
 
         Scene(boolean liveViews) {
             this.liveViews = liveViews;
@@ -1170,6 +1243,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
         @Override public void draw(Canvas canvas) {
             hardwareCanvas = canvas.isHardwareAccelerated();
+            if (probing) {
+                canvasReady = true;
+                return;
+            }
             for (PageLayer layer : pageLayers.values()) {
                 int offset = pageOffset(layer.page);
                 for (Body body : layer.bodies) drawBody(canvas, body, offset);

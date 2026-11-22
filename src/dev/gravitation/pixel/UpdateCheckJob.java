@@ -9,6 +9,7 @@ import android.app.job.JobInfo;
 import android.app.job.JobParameters;
 import android.app.job.JobScheduler;
 import android.app.job.JobService;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -31,13 +32,21 @@ public final class UpdateCheckJob extends JobService {
 
     static void schedule(Context context) {
         JobScheduler scheduler = context.getSystemService(JobScheduler.class);
-        if (scheduler.getPendingJob(JOB_ID) != null) return;
+        long interval = TimeUnit.MINUTES.toMillis(15);
+        JobInfo current = scheduler.getPendingJob(JOB_ID);
+        if (current != null && current.getIntervalMillis() == interval) return;
         JobInfo job = new JobInfo.Builder(JOB_ID, new ComponentName(context, UpdateCheckJob.class))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPeriodic(TimeUnit.HOURS.toMillis(1))
+                .setPeriodic(interval)
                 .setPersisted(true)
                 .build();
         scheduler.schedule(job);
+    }
+
+    public static final class PackageUpdated extends BroadcastReceiver {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (Intent.ACTION_MY_PACKAGE_REPLACED.equals(intent.getAction())) schedule(context);
+        }
     }
 
     @Override public boolean onStartJob(JobParameters params) {
