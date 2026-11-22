@@ -1,6 +1,7 @@
 package dev.gravitation.pixel;
 
 import android.app.Activity;
+import android.appwidget.AppWidgetHostView;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
@@ -75,6 +76,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private boolean trackingTouch;
     private boolean tap;
     private float downX, downY;
+    private float pressedLocalX, pressedLocalY;
     private Body pressedBody;
     private MotionEvent swipeStart;
     private boolean pagingTouch;
@@ -474,7 +476,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 try {
                     // Capture live content even when the hotseat is still sliding into view.
                     body = new Body(view, root.isHardwareAccelerated(), parked.homeX,
-                            parked.homeY, density, parked.launcherBar);
+                            parked.homeY, density, parked.rectangular);
                     scene.bodies.add(body);
                 } catch (RuntimeException failure) {
                     Log.w(Entry.TAG, "Could not redraw a parked launcher item", failure);
@@ -600,13 +602,14 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         if (view == null || view.getVisibility() != View.VISIBLE
                 || view.getTransitionAlpha() <= 0 || bodies.size() >= 48
                 || (requireVisibleInWindow && view.getAlpha() <= 0)) return;
-        boolean launcherBar = isLauncherBar(view);
-        if (launcherBar || iconType.isInstance(view) || isFolderIcon(view)) {
+        boolean rectangular = isLauncherBar(view) || view instanceof AppWidgetHostView;
+        if (rectangular || iconType.isInstance(view) || isFolderIcon(view)) {
             if (view.getAlpha() <= 0) return;
             int width = view.getWidth();
             int height = view.getHeight();
-            if (width < 1 || height < 1 || height > 256 * density
-                    || width > (launcherBar ? root.getWidth() : 256 * density)) return;
+            if (width < 1 || height < 1
+                    || height > (rectangular ? root.getHeight() : 256 * density)
+                    || width > (rectangular ? root.getWidth() : 256 * density)) return;
             Rect visible = new Rect();
             if (requireVisibleInWindow && (!view.getGlobalVisibleRect(visible)
                     || visible.width() < width * 0.8f || visible.height() < height * 0.8f)) return;
@@ -617,7 +620,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             if (!arena.contains((int) centerX, (int) centerY)) return;
             try {
                 bodies.add(new Body(view, root.isHardwareAccelerated(),
-                        centerX, centerY, density, launcherBar));
+                        centerX, centerY, density, rectangular));
             } catch (RuntimeException failure) {
                 Log.w(Entry.TAG, "Could not capture launcher item", failure);
             }
@@ -761,6 +764,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             int[] origin = new int[2];
             root.getLocationOnScreen(origin);
             pressedBody = findBodyAt(downX - origin[0], downY - origin[1]);
+            if (pressedBody != null) {
+                pressedLocalX = downX - origin[0] - pressedBody.x + pressedBody.width / 2f;
+                pressedLocalY = downY - origin[1] - pressedBody.y + pressedBody.height / 2f;
+            }
             tap = true;
             return true;
         }
@@ -783,9 +790,13 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             trackingTouch = false;
             pressedBody = null;
             recycleSwipeStart();
-            if (selected != null && selected.view.isAttachedToWindow()
-                    && selected.view.isClickable() && selected.view.isEnabled()
+            if (selected != null && selected.view.isAttachedToWindow() && selected.view.isEnabled()
                     && event.getEventTime() - event.getDownTime() < ViewConfiguration.getLongPressTimeout()) {
+                if (selected.view instanceof AppWidgetHostView) {
+                    dispatchWidgetTap(selected.view, event.getEventTime());
+                    return true;
+                }
+                if (!selected.view.isClickable()) return true;
                 if (isFolderIcon(selected.view)) {
                     reset();
                     selected.view.performClick();
@@ -808,6 +819,19 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             }
         }
         return true;
+    }
+
+    private void dispatchWidgetTap(View widget, long time) {
+        MotionEvent down = MotionEvent.obtain(time, time, MotionEvent.ACTION_DOWN,
+                pressedLocalX, pressedLocalY, 0);
+        MotionEvent up = MotionEvent.obtain(time, time, MotionEvent.ACTION_UP,
+                pressedLocalX, pressedLocalY, 0);
+        try {
+            if (widget.dispatchTouchEvent(down)) widget.dispatchTouchEvent(up);
+        } finally {
+            down.recycle();
+            up.recycle();
+        }
     }
 
     private void moveLaunchSource(Body body) {
@@ -1037,7 +1061,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final View view;
         final Object key;
         final int width, height;
-        final boolean launcherBar;
+        final boolean rectangular;
         final float homeX, homeY;
         final float[] motion;
 
@@ -1046,7 +1070,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             key = body.key;
             width = body.width;
             height = body.height;
-            launcherBar = body.launcherBar;
+            rectangular = body.rectangular;
             homeX = body.homeX;
             homeY = body.homeY;
             motion = new float[]{body.x, body.y, body.vx, body.vy};
@@ -1131,16 +1155,16 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final Bitmap bitmap;
         final RenderNode renderNode;
         final int width, height;
-        final boolean launcherBar;
+        final boolean rectangular;
         final Object key;
         final float transitionAlpha, radius, bounceThreshold, contactSlop;
         float homeX, homeY, x, y, vx, vy;
         boolean restoredFromLaunch;
 
         Body(View view, boolean hardwareAccelerated, float centerX, float centerY, float density,
-                boolean launcherBar) {
+                boolean rectangular) {
             this.view = view;
-            this.launcherBar = launcherBar;
+            this.rectangular = rectangular;
             width = view.getWidth();
             height = view.getHeight();
             if (hardwareAccelerated) {
@@ -1187,11 +1211,11 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
         void collide(Body other) {
             float dx = x - other.x, dy = y - other.y;
-            if (launcherBar || other.launcherBar) {
-                float overlapX = (launcherBar ? width / 2f : radius)
-                        + (other.launcherBar ? other.width / 2f : other.radius) - Math.abs(dx);
-                float overlapY = (launcherBar ? height / 2f : radius)
-                        + (other.launcherBar ? other.height / 2f : other.radius) - Math.abs(dy);
+            if (rectangular || other.rectangular) {
+                float overlapX = (rectangular ? width / 2f : radius)
+                        + (other.rectangular ? other.width / 2f : other.radius) - Math.abs(dx);
+                float overlapY = (rectangular ? height / 2f : radius)
+                        + (other.rectangular ? other.height / 2f : other.radius) - Math.abs(dy);
                 if (overlapX <= 0 || overlapY <= 0) return;
                 if (overlapX < overlapY) {
                     separate(other, dx < 0 ? -1 : 1, 0, overlapX / 2f);

@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 : "${ECJ_JAR:?Set ECJ_JAR to Eclipse ECJ 3.40.0}"
 : "${GRAVITY_KEYSTORE:?Set GRAVITY_KEYSTORE to your Android signing keystore}"
 mkdir -p build/classes build/dex
-java -jar "$ECJ_JAR" -source 8 -target 8 -proc:none -nowarn -bootclasspath "$ANDROID_JAR" -classpath "$XPOSED_JAR" \
+java -jar "$ECJ_JAR" -source 8 -target 8 -proc:none -nowarn -bootclasspath "$ANDROID_JAR:$BUILD_TOOLS/core-lambda-stubs.jar" -classpath "$XPOSED_JAR" \
     -d build/classes src/dev/gravitation/pixel/*.java
 (cd build/classes && zip -q -r ../classes.jar .)
 "$BUILD_TOOLS/d8" --release --min-api 31 --lib "$ANDROID_JAR" --classpath "$XPOSED_JAR" \
