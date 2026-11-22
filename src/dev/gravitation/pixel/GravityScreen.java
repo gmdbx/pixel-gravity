@@ -59,7 +59,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private final HomeState homeState;
     private final SensorManager sensors;
     private final Choreographer choreographer = Choreographer.getInstance();
-    private final Scene scene = new Scene();
+    private Scene scene;
     private final float density;
     private final Rect arena = new Rect();
     private final float[] filtered = new float[3];
@@ -97,7 +97,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private boolean resumedAfterLaunch;
     private ViewTreeObserver launchReturnObserver;
     private ViewTreeObserver workspaceObserver;
-    private final ArrayList<Body> parkedBodies = new ArrayList<>();
+    private final ArrayList<ParkedItem> parkedBodies = new ArrayList<>();
     private View parkedPage;
     private int parkedPageBodyCount;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -146,10 +146,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                     try {
                         syncWorkspacePage();
                         if (active && launchSource == null) {
-                            hideOriginals(scene.bodies);
-                            for (PageLayer layer : scene.pageLayers.values()) {
-                                hideOriginals(layer.bodies);
-                            }
+                            prepareSceneVisibility();
                         }
                     } catch (RuntimeException failure) {
                         reset();
@@ -162,6 +159,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     GravityScreen(Activity activity) throws ReflectiveOperationException {
         this.activity = activity;
         root = activity.getWindow().getDecorView();
+        scene = new Scene(false);
         density = root.getResources().getDisplayMetrics().density;
         touchSlop = ViewConfiguration.get(activity).getScaledTouchSlop();
         workspace = findView("workspace");
@@ -243,7 +241,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         parkedPage = scenePage;
         parkedPageBodyCount = scene.pageLayers.isEmpty() ? pageBodyCount : 0;
         parkedBodies.clear();
-        parkedBodies.addAll(scene.bodies);
+        for (Body body : scene.bodies) parkedBodies.add(new ParkedItem(body));
         removeScene();
     }
 
@@ -425,6 +423,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             arena.bottom -= bars.bottom;
         }
         if (arena.isEmpty()) return;
+        scene = new Scene(!parkedBodies.isEmpty());
         int[] rootPosition = new int[2];
         root.getLocationOnScreen(rootPosition);
         scenePage = visiblePage();
@@ -445,10 +444,11 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         scene.setBounds(0, 0, root.getWidth(), root.getHeight());
         root.getOverlay().add(scene);
         for (Body body : scene.bodies) {
-            if (parkedBodies.contains(body)) body.constrain(arena);
-            else if (savedPage != null) restorePosition(body, savedPage.get(body.key));
+            if (!body.restoredFromLaunch && savedPage != null) {
+                restorePosition(body, savedPage.get(body.key));
+            }
         }
-        hideOriginals(scene.bodies);
+        prepareSceneVisibility();
         active = true;
         Log.i(Entry.TAG, "Gravity started with " + pageBodyCount + " page items and "
                 + (scene.bodies.size() - pageBodyCount) + " shared items");
@@ -457,21 +457,34 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
 
     private void mergeParkedBodies(int from, int to, int firstSceneIndex) {
         for (int index = from; index < to; index++) {
-            Body parked = parkedBodies.get(index);
+            ParkedItem parked = parkedBodies.get(index);
             View view = parked.view;
-            // Quickstep may temporarily hide the hotseat or move it outside the window.
             if (view.getRootView() != root || !view.isAttachedToWindow()
                     || view.getVisibility() == View.GONE || view.getWidth() != parked.width
                     || view.getHeight() != parked.height || itemKey(view) != parked.key) continue;
+
             int existing = firstSceneIndex;
             while (existing < scene.bodies.size() && scene.bodies.get(existing).view != view) {
                 existing++;
             }
+            Body body;
             if (existing < scene.bodies.size()) {
-                scene.bodies.set(existing, parked);
+                body = scene.bodies.get(existing);
             } else {
-                scene.bodies.add(parked);
+                try {
+                    // Capture live content even when the hotseat is still sliding into view.
+                    body = new Body(view, root.isHardwareAccelerated(), parked.homeX,
+                            parked.homeY, density, parked.launcherBar);
+                    scene.bodies.add(body);
+                } catch (RuntimeException failure) {
+                    Log.w(Entry.TAG, "Could not redraw a parked launcher item", failure);
+                    continue;
+                }
             }
+            body.homeX = parked.homeX;
+            body.homeY = parked.homeY;
+            restorePosition(body, parked.motion);
+            body.restoredFromLaunch = true;
         }
     }
 
@@ -486,9 +499,26 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         return tag != null ? tag : view;
     }
 
-    private static void hideOriginals(List<Body> bodies) {
+    private void prepareSceneVisibility() {
+        if (scene.waitingForCanvas) {
+            if (!scene.canvasSeen) return;
+            scene.waitingForCanvas = false;
+            scene.invalidateSelf();
+            Log.i(Entry.TAG, "Gravity layer ready after app return");
+        }
+        updateOriginalVisibility(scene.bodies);
+        for (PageLayer layer : scene.pageLayers.values()) {
+            updateOriginalVisibility(layer.bodies);
+        }
+    }
+
+    private void updateOriginalVisibility(List<Body> bodies) {
         for (Body body : bodies) {
-            if (body.view.getTransitionAlpha() != 0f) body.view.setTransitionAlpha(0f);
+            if (scene.canDraw(body)) {
+                if (body.view.getTransitionAlpha() != 0f) body.view.setTransitionAlpha(0f);
+            } else {
+                restoreVisibility(body);
+            }
         }
     }
 
@@ -723,7 +753,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 return false;
             }
             recycleSwipeStart();
-            trackingTouch = active;
+            trackingTouch = active && !scene.waitingForCanvas;
             if (!trackingTouch) return false;
             swipeStart = MotionEvent.obtain(event);
             downX = event.getRawX();
@@ -890,8 +920,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             scene.pageLayers.put(page, layer);
             for (Body body : layer.bodies) {
                 restorePosition(body, positions == null ? null : positions.get(body.key));
-                body.view.setTransitionAlpha(0f);
             }
+            if (!scene.waitingForCanvas) updateOriginalVisibility(layer.bodies);
         }
     }
 
@@ -1003,6 +1033,26 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
     }
 
+    private static final class ParkedItem {
+        final View view;
+        final Object key;
+        final int width, height;
+        final boolean launcherBar;
+        final float homeX, homeY;
+        final float[] motion;
+
+        ParkedItem(Body body) {
+            view = body.view;
+            key = body.key;
+            width = body.width;
+            height = body.height;
+            launcherBar = body.launcherBar;
+            homeX = body.homeX;
+            homeY = body.homeY;
+            motion = new float[]{body.x, body.y, body.vx, body.vy};
+        }
+    }
+
     private static final class LaunchSource {
         final Body body;
         final float originalX, originalY, targetX, targetY;
@@ -1029,8 +1079,27 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final ArrayList<Body> bodies = new ArrayList<>();
         final IdentityHashMap<View, PageLayer> pageLayers = new IdentityHashMap<>();
         final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        boolean waitingForCanvas;
+        boolean canvasSeen;
+        boolean hardwareCanvas;
+
+        Scene(boolean waitingForCanvas) {
+            this.waitingForCanvas = waitingForCanvas;
+            hardwareCanvas = root != null && root.isHardwareAccelerated();
+        }
+
+        boolean canDraw(Body body) {
+            return body.renderNode == null
+                    ? body.bitmap != null && !body.bitmap.isRecycled()
+                    : hardwareCanvas && body.renderNode.hasDisplayList();
+        }
 
         @Override public void draw(Canvas canvas) {
+            hardwareCanvas = canvas.isHardwareAccelerated();
+            if (waitingForCanvas) {
+                canvasSeen = true;
+                return;
+            }
             for (PageLayer layer : pageLayers.values()) {
                 int offset = pageOffset(layer.page);
                 for (Body body : layer.bodies) drawBody(canvas, body, offset);
@@ -1039,6 +1108,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
 
         private void drawBody(Canvas canvas, Body body, int offset) {
+            if (!canDraw(body)) return;
             if (launchSource != null && body == launchSource.body && !root.hasWindowFocus()) return;
             float left = body.x - body.width / 2f + offset;
             float top = body.y - body.height / 2f;
@@ -1063,8 +1133,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final int width, height;
         final boolean launcherBar;
         final Object key;
-        final float transitionAlpha, homeY, radius, bounceThreshold, contactSlop;
-        float homeX, x, y, vx, vy;
+        final float transitionAlpha, radius, bounceThreshold, contactSlop;
+        float homeX, homeY, x, y, vx, vy;
+        boolean restoredFromLaunch;
 
         Body(View view, boolean hardwareAccelerated, float centerX, float centerY, float density,
                 boolean launcherBar) {
