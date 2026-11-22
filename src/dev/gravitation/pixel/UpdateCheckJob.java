@@ -40,7 +40,11 @@ public final class UpdateCheckJob extends JobService {
                 .setPeriodic(interval)
                 .setPersisted(true)
                 .build();
-        scheduler.schedule(job);
+        try {
+            scheduler.schedule(job);
+        } catch (IllegalStateException | SecurityException failure) {
+            Log.w("PixelGravity", "Could not schedule background update checks", failure);
+        }
     }
 
     public static final class PackageUpdated extends BroadcastReceiver {

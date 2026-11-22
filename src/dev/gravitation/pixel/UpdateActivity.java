@@ -16,6 +16,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -61,6 +62,7 @@ public final class UpdateActivity extends Activity {
             return;
         }
         createCard();
+        Log.i("PixelGravity", "Update screen opened");
         UpdateCheckJob.schedule(this);
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
