@@ -42,6 +42,7 @@ import java.util.List;
 final class GravityScreen implements SensorEventListener, Choreographer.FrameCallback {
     private static final float GRAVITY_SCALE = 330f;
     private static final float MAX_SPEED_DP_PER_SECOND = 950f;
+    private static final float DOCK_GAP_DP = 16f;
     private static final float SHAKE_ACCELERATION_THRESHOLD = 13.5f; // m/s²
 
     private static final long APP_LAUNCH_GRACE_MS = 2000;
@@ -66,6 +67,9 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     private long returnOverlayTime;
     private final float density;
     private final Rect arena = new Rect();
+    private final Rect workspaceArena = new Rect();
+    private final Rect dockArena = new Rect();
+    private int boundsWidth, boundsHeight;
     private final float[] filtered = new float[3];
     private boolean initialized;
     private boolean active;
@@ -449,6 +453,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         collect(hotseat, rootPosition, scene.bodies, true);
         if (root instanceof ViewGroup) collectSearchOutsideWorkspace((ViewGroup) root, rootPosition);
         mergeParkedBodies(parkedPageBodyCount, parkedBodies.size(), pageBodyCount);
+        configureGravityBounds(rootPosition[1]);
         IdentityHashMap<Object, float[]> savedPage = pagePositions.get(scenePage);
         if (scene.bodies.isEmpty()) {
             Log.w(Entry.TAG, "No visible BubbleTextView icons");
@@ -460,6 +465,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             if (!body.restoredFromLaunch && savedPage != null) {
                 restorePosition(body, savedPage.get(body.key));
             }
+            constrainBody(body);
         }
         prepareSceneVisibility();
         active = true;
@@ -487,7 +493,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 try {
                     // Capture live content even when the hotseat is still sliding into view.
                     body = new Body(view, scene.liveViews, root.isHardwareAccelerated(), parked.homeX,
-                            parked.homeY, density, parked.rectangular);
+                            parked.homeY, density, parked.rectangular, isDockItem(view));
                     scene.bodies.add(body);
                 } catch (RuntimeException failure) {
                     Log.w(Entry.TAG, "Could not redraw a parked launcher item", failure);
@@ -525,7 +531,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             try {
                 for (Body item : scene.bodies) {
                     candidate.bodies.add(new Body(item.view, false, root.isHardwareAccelerated(),
-                            item.homeX, item.homeY, density, item.rectangular));
+                            item.homeX, item.homeY, density, item.rectangular, item.inDock));
                 }
             } catch (RuntimeException failure) {
                 returnOverlayTime = Long.MAX_VALUE;
@@ -634,7 +640,8 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
     }
 
     private boolean isLauncherBar(View view) {
-        if (view == dockSearch) return true;
+        int searchId = launcherBarIds[0];
+        if (view == dockSearch || (searchId != 0 && view.getId() == searchId)) return true;
         String type = view.getClass().getSimpleName();
         if (type.equals("HotseatQsb") || type.equals("SmartspaceView")
                 || type.equals("SmartspaceViewContainer") || type.equals("BcSmartspaceView")) return true;
@@ -658,13 +665,68 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         }
     }
 
+    private boolean isDockItem(View view) {
+        int searchId = launcherBarIds[0];
+        if (view == dockSearch || (searchId != 0 && view.getId() == searchId)) return true;
+        for (ViewParent parent = view.getParent(); parent != null; parent = parent.getParent()) {
+            if (parent == hotseat) return true;
+            if (parent == workspace || parent == root) break;
+        }
+        return false;
+    }
+
+    private void configureGravityBounds(int rootTop) {
+        int width = root.getWidth();
+        int height = root.getHeight();
+        // The hotseat may still be translated when coming back from an app.
+        if (!parkedBodies.isEmpty() && boundsWidth == width && boundsHeight == height) return;
+        boundsWidth = width;
+        boundsHeight = height;
+        workspaceArena.set(arena);
+        dockArena.set(arena);
+
+        int dockTop = arena.bottom;
+        int tallestDockItem = 0;
+        for (Body body : scene.bodies) {
+            if (body.inDock) {
+                dockTop = Math.min(dockTop, Math.round(body.homeY - body.height / 2f));
+                tallestDockItem = Math.max(tallestDockItem, body.height);
+            }
+        }
+        if (dockTop == arena.bottom) return;
+        int[] position = new int[2];
+        if (hotseat != null && hotseat.getHeight() > 0) {
+            hotseat.getLocationOnScreen(position);
+            int layoutTop = position[1] - rootTop;
+            if (layoutTop > arena.centerY()) dockTop = Math.min(dockTop, layoutTop);
+        }
+        dockArena.top = Math.max(arena.top, Math.min(dockTop, arena.bottom - tallestDockItem));
+        workspaceArena.bottom = Math.max(arena.top + 1,
+                dockArena.top - Math.round(DOCK_GAP_DP * density));
+        for (int i = 0; i < pageBodyCount; i++) {
+            Body body = scene.bodies.get(i);
+            if (!(body.view.getParent() instanceof View)) continue;
+            View container = (View) body.view.getParent();
+            if (!container.getClass().getSimpleName().equals("ShortcutAndWidgetContainer")) continue;
+            container.getLocationOnScreen(position);
+            int gridBottom = position[1] - rootTop + container.getHeight();
+            if (gridBottom > arena.centerY()) {
+                workspaceArena.bottom = Math.min(workspaceArena.bottom, gridBottom);
+            }
+        }
+        Log.i(Entry.TAG, "Workspace bottom " + workspaceArena.bottom + ", dock top " + dockArena.top);
+    }
+
+    private void constrainBody(Body body) {
+        body.constrain(body.inDock ? dockArena : workspaceArena);
+    }
+
     private void restorePosition(Body body, float[] position) {
         if (position == null) return;
         body.x = position[0];
         body.y = position[1];
         body.vx = position[2];
         body.vy = position[3];
-        body.constrain(arena);
     }
 
     private static boolean isFolderIcon(View view) {
@@ -694,7 +756,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             if (!arena.contains((int) centerX, (int) centerY)) return;
             try {
                 bodies.add(new Body(view, scene.liveViews, root.isHardwareAccelerated(),
-                        centerX, centerY, density, rectangular));
+                        centerX, centerY, density, rectangular, isDockItem(view)));
             } catch (RuntimeException failure) {
                 Log.w(Entry.TAG, "Could not capture launcher item", failure);
             }
@@ -805,11 +867,11 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
                 if (body == opening) continue;
                 for (int j = 0; j < i; j++) {
                     Body other = bodies.get(j);
-                    if (other != opening) body.collide(other);
+                    if (other != opening && body.inDock == other.inDock) body.collide(other);
                 }
             }
             for (Body body : bodies) {
-                if (body != opening) body.constrain(arena);
+                if (body != opening) constrainBody(body);
             }
         }
     }
@@ -1023,6 +1085,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             scene.pageLayers.put(page, layer);
             for (Body body : layer.bodies) {
                 restorePosition(body, positions == null ? null : positions.get(body.key));
+                constrainBody(body);
             }
             updateOriginalVisibility(layer.bodies);
         }
@@ -1065,6 +1128,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
             for (Body body : incoming.bodies) {
                 body.x += offset;
                 body.homeX += offset;
+                constrainBody(body);
             }
             scene.bodies.addAll(0, incoming.bodies);
         }
@@ -1335,6 +1399,7 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         final RenderNode renderNode;
         final int width, height;
         final boolean rectangular;
+        final boolean inDock;
         final Object key;
         final float transitionAlpha, radius, bounceThreshold, contactSlop;
         float homeX, homeY, x, y, vx, vy;
@@ -1342,9 +1407,10 @@ final class GravityScreen implements SensorEventListener, Choreographer.FrameCal
         LiveTranslation translation;
 
         Body(View view, boolean liveView, boolean hardwareAccelerated, float centerX, float centerY,
-                float density, boolean rectangular) {
+                float density, boolean rectangular, boolean inDock) {
             this.view = view;
             this.rectangular = rectangular;
+            this.inDock = inDock;
             width = view.getWidth();
             height = view.getHeight();
             if (liveView) {
