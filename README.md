@@ -1,38 +1,41 @@
-# Pixel Gravity 0.2.6
+# Pixel Gravity
 
-Прототип эффекта Gravitation для штатного Pixel Launcher
-(`com.google.android.apps.nexuslauncher`) на Pixel 6. Целевая сборка Android —
-CP3A.261005.002.A1. APK собран и проверен apksigner. Проверка на телефоне
-и проверка внутренних классов именно этой версии Pixel Launcher ещё предстоят.
+[Русский](#русский) · [English](#english)
 
-1. Установи APK обычным способом. Требуется уже работающий Xposed-фреймворк
-   с поддержкой Legacy Xposed API на твоей сборке Android.
-2. В менеджере фреймворка включи Pixel Gravity и выбери только Pixel Launcher.
-   Перезагрузи телефон, чтобы модуль загрузился в процесс лаунчера.
-3. На домашнем экране встряхни телефон, затем наклони его. Повторное
-   встряхивание возвращает иконки. Нажатие на движущуюся иконку открывает её.
-   После возврата из приложения эффект продолжается две секунды, затем иконки плавно возвращаются в сетку.
+## Русский
 
-Анимируются ярлыки, папки, виджеты, нижний поиск и блок даты. Можно листать рабочие столы, позиции иконок сохраняются отдельно для каждого.
-Док закреплённых приложений отделён зазором от ярлыков рабочего стола и строки поиска.
-При проблеме отключи Pixel Gravity в менеджере фреймворка и перезагрузи
-телефон. Для диагностики после запуска лаунчера: `adb logcat -d -s PixelGravity`.
+**Порт твика Gravitation для Pixel Launcher.** При встряхивании ярлыки, папки, виджеты и поиск начинают двигаться под действием наклона телефона. При перелистывании каждый рабочий стол сохраняет позиции своих иконок.
 
-## Обновления
+### Установка и использование
 
-Открой приложение Pixel Gravity с рабочего стола или из списка модулей Vector, чтобы проверить релизы на GitHub. Если есть новая
-версия, «Обновить» загрузит APK и откроет системный установщик. При первой
-установке через обновлятор Android может попросить разрешить установку из
-Pixel Gravity. «Пропустить» запоминает эту версию. Её можно снова найти
-кнопкой «Проверить».
-После разрешения уведомлений Android проверяет релизы в фоне примерно раз в 15 минут. При загрузке APK приложение показывает прогресс.
-Начиная с 0.2.3 уже запущенный Pixel Launcher перезапускается сам при
-замене APK. После первой установки 0.2.3 перезапусти его вручную один раз.
+1. Нужен штатный Pixel Launcher (`com.google.android.apps.nexuslauncher`) и работающий Xposed-фреймворк с поддержкой Legacy Xposed API. Если у тебя уже есть KernelSU, можно установить ZIP NeoZygisk и Vector через менеджер KernelSU, а затем перезагрузить телефон. [NeoZygisk](https://github.com/JingMatrix/NeoZygisk/releases) · [Vector](https://github.com/JingMatrix/Vector/releases)
+2. Скачай и установи `PixelGravity.apk`. [Релизы Pixel Gravity](https://github.com/gmdbx/pixel-gravity/releases/latest)
+3. В **Vector → Модули → Pixel Gravity** включи модуль, отметь **Pixel Launcher** и перезапусти лаунчер. Если пользуешься ADB, выполни `adb shell am force-stop com.google.android.apps.nexuslauncher`, затем вернись на домашний экран.
+4. На домашнем экране встряхни телефон, затем наклони его. Чтобы вернуть иконки в сетку, встряхни телефон снова. Короткое нажатие на движущуюся иконку открывает приложение.
 
-## Сборка
+Целевая конфигурация — Pixel 6 со штатным Android 17 `CP3A.261005.002.A1`. Если эффект не запускается, проверь область действия модуля в Vector и собери журнал командой `adb logcat -d -s PixelGravity`.
 
-Требуются Java, zip, Android SDK Platform 35 и Build Tools 35.0.0, Eclipse
-ECJ 3.40.0, Xposed API 82 и собственное хранилище ключей Android. Задай
-абсолютные пути в переменных ANDROID_JAR, BUILD_TOOLS, ECJ_JAR, XPOSED_JAR
-и GRAVITY_KEYSTORE, затем запусти `./build.sh`. Готовый файл появится
-в `build/PixelGravity.apk`. Ключ прототипа не входит в архив исходников.
+### Сборка
+
+Нужны Java, `zip`, Android SDK Platform 35, Build Tools 35.0.0, Eclipse ECJ 3.40.0, Xposed API 82 и ключ подписи Android. Задай абсолютные пути в переменных `ANDROID_JAR`, `BUILD_TOOLS`, `ECJ_JAR`, `XPOSED_JAR` и `GRAVITY_KEYSTORE`. Запусти `./build.sh`. APK появится в `build/PixelGravity.apk`.
+
+[Исходный твик Gravitation для iOS](https://github.com/kritanta-ios-tweaks/Gravitation)
+
+## English
+
+**A port of the Gravitation tweak for Pixel Launcher.** Shake your phone to let shortcuts, folders, widgets, and the search bar move with its tilt. Each home screen page preserves its own icon positions when you swipe between pages.
+
+### Installation and usage
+
+1. Use the stock Pixel Launcher (`com.google.android.apps.nexuslauncher`) and an Xposed framework that supports the Legacy Xposed API. If KernelSU is already working, install the NeoZygisk and Vector ZIP files through KernelSU Manager and reboot. [NeoZygisk](https://github.com/JingMatrix/NeoZygisk/releases) · [Vector](https://github.com/JingMatrix/Vector/releases)
+2. Download and install `PixelGravity.apk`. [Pixel Gravity releases](https://github.com/gmdbx/pixel-gravity/releases/latest)
+3. In **Vector → Modules → Pixel Gravity**, enable the module, select **Pixel Launcher**, and restart the launcher. If you use ADB, run `adb shell am force-stop com.google.android.apps.nexuslauncher` and return to the home screen.
+4. Shake your phone on the home screen, then tilt it. Shake again to return the icons to the grid. Tap a moving icon to open its app.
+
+The target device is a Pixel 6 running stock Android 17 build `CP3A.261005.002.A1`. If gravity does not start, check the module scope in Vector and collect logs with `adb logcat -d -s PixelGravity`.
+
+### Build
+
+You need Java, `zip`, Android SDK Platform 35, Build Tools 35.0.0, Eclipse ECJ 3.40.0, Xposed API 82, and an Android signing key. Set absolute paths in `ANDROID_JAR`, `BUILD_TOOLS`, `ECJ_JAR`, `XPOSED_JAR`, and `GRAVITY_KEYSTORE`. Run `./build.sh` to produce `build/PixelGravity.apk`.
+
+[Original Gravitation tweak for iOS](https://github.com/kritanta-ios-tweaks/Gravitation)
