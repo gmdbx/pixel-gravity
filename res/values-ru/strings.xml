@@ -1,0 +1,31 @@
+<resources>
+    <string name="language_ru">Русский</string>
+    <string name="language_en">Английский</string>
+    <string name="update_checking">Проверяю обновления…</string>
+    <string name="update_checking_button">Проверка</string>
+    <string name="update_close">Закрыть</string>
+    <string name="update_latest">Установлена актуальная версия</string>
+    <string name="update_version">Версия %1$s</string>
+    <string name="update_check">Проверить</string>
+    <string name="update_skipped">Обновление пропущено</string>
+    <string name="update_available">Доступно обновление</string>
+    <string name="update_download">Обновить</string>
+    <string name="update_skip">Пропустить</string>
+    <string name="update_check_error">Попробуй проверить обновления ещё раз.</string>
+    <string name="update_downloading">Загрузка обновления</string>
+    <string name="update_downloading_button">Загрузка</string>
+    <string name="update_verify_signature">Проверяю подпись APK…</string>
+    <string name="update_ready">Обновление готово</string>
+    <string name="update_install">Установить</string>
+    <string name="update_download_error">Не удалось загрузить или проверить APK.</string>
+    <string name="update_progress">Версия %1$s · %2$d%%</string>
+    <string name="update_permission_title">Разрешение на установку</string>
+    <string name="update_permission_body">Разреши установку из Pixel Gravity в настройках Android.</string>
+    <string name="update_settings">Настройки</string>
+    <string name="update_installer_error">Android не смог открыть установщик APK.</string>
+    <string name="update_confirm">Подтверди установку в Android.</string>
+    <string name="update_unavailable">Обновление недоступно</string>
+    <string name="update_retry">Повторить</string>
+    <string name="update_channel">Обновления Pixel Gravity</string>
+    <string name="update_notification">Доступно обновление Pixel Gravity</string>
+</resources>

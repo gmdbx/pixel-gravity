@@ -2,6 +2,7 @@ package dev.gravitation.pixel;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -39,6 +40,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.function.IntConsumer;
 
 public final class UpdateActivity extends Activity {
@@ -46,12 +48,21 @@ public final class UpdateActivity extends Activity {
     private static final String DOWNLOAD = "https://github.com/gmdbx/pixel-gravity/releases/download/";
     private static final int APK_LIMIT = 16 * 1024 * 1024;
 
+    private static final String LANGUAGE_PREFERENCE = "update_language";
+
     private TextView title;
     private TextView detail;
     private Button primary;
     private ProgressBar progress;
     private Button secondary;
     private String currentVersion;
+    private Button russian;
+    private Button english;
+    private int accent;
+    private int onAccent;
+    private Context languageContext;
+    private int titleLabel, detailLabel, primaryLabel, secondaryLabel;
+    private Object[] detailArguments;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -61,6 +72,7 @@ public final class UpdateActivity extends Activity {
             finish();
             return;
         }
+        languageContext = localized(this);
         createCard();
         Log.i("PixelGravity", "Update screen opened");
         UpdateCheckJob.schedule(this);
@@ -79,21 +91,51 @@ public final class UpdateActivity extends Activity {
         int background = getColor(dark ? android.R.color.system_neutral1_900 : android.R.color.system_neutral1_50);
         int surface = getColor(dark ? android.R.color.system_neutral1_800 : android.R.color.system_neutral1_100);
         int foreground = getColor(dark ? android.R.color.system_neutral1_50 : android.R.color.system_neutral1_900);
-        int accent = getColor(dark ? android.R.color.system_accent1_200 : android.R.color.system_accent1_600);
-        int onAccent = getColor(dark ? android.R.color.system_accent1_900 : android.R.color.system_accent1_0);
+        accent = getColor(dark ? android.R.color.system_accent1_200 : android.R.color.system_accent1_600);
+        onAccent = getColor(dark ? android.R.color.system_accent1_900 : android.R.color.system_accent1_0);
         getWindow().setStatusBarColor(background);
         getWindow().setNavigationBarColor(background);
 
         LinearLayout outer = new LinearLayout(this);
         outer.setGravity(Gravity.CENTER);
+        outer.setOrientation(LinearLayout.VERTICAL);
         outer.setPadding(dp(20), dp(20), dp(20), dp(20));
         outer.setBackgroundColor(background);
+        TextView credit = new TextView(this);
+        credit.setText(R.string.author_credit);
+        credit.setTextSize(13);
+        credit.setTextColor(getColor(dark ? android.R.color.system_neutral1_200 : android.R.color.system_neutral1_700));
+        LinearLayout.LayoutParams creditParams = new LinearLayout.LayoutParams(-2, -2);
+        creditParams.bottomMargin = dp(10);
+        outer.addView(credit, creditParams);
+
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(20), dp(22), dp(20), dp(18));
+        card.setPadding(dp(20), dp(12), dp(20), dp(18));
         card.setBackground(shape(surface, 28));
         outer.addView(card, new LinearLayout.LayoutParams(
                 Math.min(dp(400), getResources().getDisplayMetrics().widthPixels - dp(40)), -2));
+
+        LinearLayout languages = new LinearLayout(this);
+        languages.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams languageParams = new LinearLayout.LayoutParams(-2, -2);
+        languageParams.gravity = Gravity.END;
+        languageParams.bottomMargin = dp(4);
+        card.addView(languages, languageParams);
+        russian = actionButton(Color.TRANSPARENT, accent);
+        english = actionButton(Color.TRANSPARENT, accent);
+        russian.setText("RU");
+        english.setText("EN");
+        russian.setOnClickListener(view -> selectLanguage("ru"));
+        english.setOnClickListener(view -> selectLanguage("en"));
+        languages.addView(russian, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        TextView divider = new TextView(this);
+        divider.setText("/");
+        divider.setTextColor(foreground);
+        divider.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        languages.addView(divider);
+        languages.addView(english, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        renderLanguageSwitch();
 
         title = new TextView(this);
         title.setTextColor(foreground);
@@ -126,12 +168,16 @@ public final class UpdateActivity extends Activity {
         Button button = new Button(this);
         button.setAllCaps(false);
         button.setTextSize(14);
-        button.setTextColor(ink);
         button.setStateListAnimator(null);
         button.setPadding(dp(8), 0, dp(8), 0);
+        styleButton(button, fill, ink);
+        return button;
+    }
+
+    private void styleButton(Button button, int fill, int ink) {
+        button.setTextColor(ink);
         button.setBackground(new RippleDrawable(ColorStateList.valueOf((ink & 0xffffff) | 0x22000000),
                 shape(fill, 24), shape(Color.WHITE, 24)));
-        return button;
     }
 
     private GradientDrawable shape(int color, int radius) {
@@ -143,43 +189,85 @@ public final class UpdateActivity extends Activity {
 
     private int dp(int size) { return Math.round(size * getResources().getDisplayMetrics().density); }
 
-    private void show(String heading, String description, String button, Runnable action,
-            String other, Runnable otherAction) {
-        title.setText(heading);
-        detail.setText(description);
+    static Context localized(Context context) {
+        String language = UpdateCheckJob.preferences(context).getString(LANGUAGE_PREFERENCE, "ru");
+        Configuration config = new Configuration(context.getResources().getConfiguration());
+        config.setLocale("en".equals(language) ? Locale.ENGLISH : new Locale("ru"));
+        return context.createConfigurationContext(config);
+    }
+
+    private void selectLanguage(String language) {
+        UpdateCheckJob.preferences(this).edit().putString(LANGUAGE_PREFERENCE, language).apply();
+        languageContext = localized(this);
+        renderLanguageSwitch();
+        renderLabels();
+    }
+
+    private void renderLanguageSwitch() {
+        boolean inEnglish = "en".equals(languageContext.getResources()
+                .getConfiguration().getLocales().get(0).getLanguage());
+        russian.setSelected(!inEnglish);
+        english.setSelected(inEnglish);
+        russian.setContentDescription(languageContext.getString(R.string.language_ru));
+        english.setContentDescription(languageContext.getString(R.string.language_en));
+        styleButton(russian, inEnglish ? Color.TRANSPARENT : accent, inEnglish ? accent : onAccent);
+        styleButton(english, inEnglish ? accent : Color.TRANSPARENT, inEnglish ? onAccent : accent);
+    }
+
+    private void renderLabels() {
+        if (titleLabel == 0) return;
+        title.setText(languageContext.getString(titleLabel));
+        detail.setText(languageContext.getString(detailLabel, detailArguments));
+        primary.setText(languageContext.getString(primaryLabel));
+        secondary.setText(languageContext.getString(secondaryLabel));
+    }
+
+    private void setDetail(int label, Object... arguments) {
+        detailLabel = label;
+        detailArguments = arguments;
+        detail.setText(languageContext.getString(detailLabel, detailArguments));
+    }
+
+    private void show(int heading, int description, int button, Runnable action,
+            int other, Runnable otherAction, Object... arguments) {
+        titleLabel = heading;
+        detailLabel = description;
+        detailArguments = arguments;
+        primaryLabel = button;
+        secondaryLabel = other;
+        renderLabels();
         progress.setVisibility(View.GONE);
-        primary.setText(button);
         primary.setEnabled(action != null);
         primary.setOnClickListener(action == null ? null : view -> action.run());
-        secondary.setText(other);
         secondary.setOnClickListener(view -> otherAction.run());
     }
 
     private void check(boolean includeSkipped) {
-        show("Pixel Gravity", "Проверяю обновления…", "Проверка", null, "Закрыть", this::finish);
+        show(R.string.app_name, R.string.update_checking, R.string.update_checking_button,
+                null, R.string.update_close, this::finish);
         new Thread(() -> {
             try {
                 String version = newestRelease(currentVersion);
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
                     if (version == null) {
-                        show("Установлена актуальная версия", "Версия " + currentVersion,
-                                "Проверить", () -> check(true), "Закрыть", this::finish);
+                        show(R.string.update_latest, R.string.update_version, R.string.update_check,
+                                () -> check(true), R.string.update_close, this::finish, currentVersion);
                     } else if (!includeSkipped && version.equals(
                             getPreferences(MODE_PRIVATE).getString("skipped_version", ""))) {
-                        show("Обновление пропущено", "Версия " + version,
-                                "Проверить", () -> check(true), "Закрыть", this::finish);
+                        show(R.string.update_skipped, R.string.update_version, R.string.update_check,
+                                () -> check(true), R.string.update_close, this::finish, version);
                     } else {
-                        show("Доступно обновление", "Версия " + version,
-                                "Обновить", () -> download(version), "Пропустить", () -> {
+                        show(R.string.update_available, R.string.update_version,
+                                R.string.update_download, () -> download(version), R.string.update_skip, () -> {
                                     getPreferences(MODE_PRIVATE).edit()
                                             .putString("skipped_version", version).apply();
                                     finish();
-                                });
+                                }, version);
                     }
                 });
             } catch (Exception failure) {
-                showError("Попробуй проверить обновления ещё раз.", () -> check(includeSkipped));
+                showError(R.string.update_check_error, () -> check(includeSkipped));
             }
         }, "PixelGravityReleaseCheck").start();
     }
@@ -221,7 +309,8 @@ public final class UpdateActivity extends Activity {
     }
 
     private void download(String version) {
-        show("Загрузка обновления", "Версия " + version, "Загрузка", null, "Закрыть", this::finish);
+        show(R.string.update_downloading, R.string.update_version, R.string.update_downloading_button,
+                null, R.string.update_close, this::finish, version);
         progress.setIndeterminate(true);
         progress.setVisibility(View.VISIBLE);
         new Thread(() -> {
@@ -237,7 +326,7 @@ public final class UpdateActivity extends Activity {
                 }
                 runOnUiThread(() -> {
                     if (!isFinishing() && !isDestroyed()) {
-                        detail.setText("Проверяю подпись APK…");
+                        setDetail(R.string.update_verify_signature);
                         progress.setIndeterminate(true);
                     }
                 });
@@ -247,12 +336,12 @@ public final class UpdateActivity extends Activity {
                 }
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
-                    show("Обновление готово", "Версия " + version,
-                            "Установить", this::install, "Закрыть", this::finish);
+                    show(R.string.update_ready, R.string.update_version, R.string.update_install,
+                            this::install, R.string.update_close, this::finish, version);
                     install();
                 });
             } catch (Exception failure) {
-                showError("Не удалось загрузить или проверить APK.", () -> download(version));
+                showError(R.string.update_download_error, () -> download(version));
             } finally {
                 if (temporary != null) temporary.delete();
             }
@@ -271,7 +360,7 @@ public final class UpdateActivity extends Activity {
                     if (isFinishing() || isDestroyed()) return;
                     progress.setIndeterminate(false);
                     progress.setProgress(percent);
-                    detail.setText("Версия " + version + " · " + percent + "%");
+                    setDetail(R.string.update_progress, version, percent);
                 });
             }
         };
@@ -297,9 +386,9 @@ public final class UpdateActivity extends Activity {
 
     private void install() {
         if (!getPackageManager().canRequestPackageInstalls()) {
-            show("Разрешение на установку", "Разреши установку из Pixel Gravity в настройках Android.",
-                    "Настройки", () -> startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:" + getPackageName()))), "Закрыть", this::finish);
+            show(R.string.update_permission_title, R.string.update_permission_body,
+                    R.string.update_settings, () -> startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + getPackageName()))), R.string.update_close, this::finish);
             return;
         }
         try {
@@ -307,23 +396,24 @@ public final class UpdateActivity extends Activity {
                     .setDataAndType(UpdateApkProvider.APK, UpdateApkProvider.MIME)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
         } catch (RuntimeException failure) {
-            showError("Android не смог открыть установщик APK.", this::install);
+            showError(R.string.update_installer_error, this::install);
         }
     }
 
     @Override protected void onResume() {
         super.onResume();
-        if (primary != null && "Настройки".contentEquals(primary.getText())
+        if (primaryLabel == R.string.update_settings
                 && getPackageManager().canRequestPackageInstalls()) {
-            show("Обновление готово", "Подтверди установку в Android.",
-                    "Установить", this::install, "Закрыть", this::finish);
+            show(R.string.update_ready, R.string.update_confirm, R.string.update_install,
+                    this::install, R.string.update_close, this::finish);
         }
     }
 
-    private void showError(String message, Runnable retry) {
+    private void showError(int message, Runnable retry) {
         runOnUiThread(() -> {
             if (!isFinishing() && !isDestroyed()) {
-                show("Обновление недоступно", message, "Повторить", retry, "Закрыть", this::finish);
+                show(R.string.update_unavailable, message, R.string.update_retry,
+                        retry, R.string.update_close, this::finish);
             }
         });
     }

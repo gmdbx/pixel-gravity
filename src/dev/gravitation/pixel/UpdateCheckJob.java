@@ -98,16 +98,17 @@ public final class UpdateCheckJob extends JobService {
         SharedPreferences prefs = preferences(this);
         if (version == null || version.equals(prefs.getString("skipped_version", ""))
                 || version.equals(prefs.getString("notified_version", ""))) return;
+        Context language = UpdateActivity.localized(this);
         manager.createNotificationChannel(new NotificationChannel(
-                CHANNEL, "Обновления Pixel Gravity", NotificationManager.IMPORTANCE_DEFAULT));
+                CHANNEL, language.getString(R.string.update_channel), NotificationManager.IMPORTANCE_DEFAULT));
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, UpdateActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         int icon = getResources().getIdentifier("ic_update_notification", "drawable", getPackageName());
         manager.notify(NOTIFICATION_ID, new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(icon)
-                .setContentTitle("Доступно обновление Pixel Gravity")
-                .setContentText("Версия " + version)
+                .setContentTitle(language.getString(R.string.update_notification))
+                .setContentText(language.getString(R.string.update_version, version))
                 .setContentIntent(open)
                 .setAutoCancel(true)
                 .build());
